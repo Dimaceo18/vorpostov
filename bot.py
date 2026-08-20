@@ -18,17 +18,19 @@ import asyncio
 # ==================== НАСТРОЙКИ ====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-RSS_FEED_URL = os.getenv("RSS_FEED_URL", "")  # URL вашего RSS-агрегатора
+SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "")  # Имена каналов через запятую
 TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID", "")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
 MAX_POST_AGE_MINUTES = int(os.getenv("MAX_POST_AGE_MINUTES", "5"))
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не настроен!")
-if not RSS_FEED_URL:
-    raise ValueError("❌ RSS_FEED_URL не настроен!")
+if not SOURCE_CHANNELS:
+    raise ValueError("❌ SOURCE_CHANNELS не настроен!")
 if not TARGET_CHANNEL_ID:
     raise ValueError("❌ TARGET_CHANNEL_ID не настроен!")
+
+SOURCE_CHANNEL_LIST = [x.strip() for x in SOURCE_CHANNELS.split(',') if x.strip()]
 
 # Стиль ЧП ВМ
 TARGET_W = int(os.getenv("TARGET_W", "720"))
@@ -274,39 +276,58 @@ def process_photo_bytes(photo_bytes, title_text):
 
 # ==================== ПАРСИНГ RSS ====================
 
-def get_rss_items():
-    """Получение постов из RSS-агрегатора"""
+def get_rss_items_for_channel(channel_name):
+    """Получение RSS из готового сервиса"""
     try:
-        logger.info(f"📡 Запрос к RSS: {RSS_FEED_URL}")
+        rss_url = f"https://telegram-rss-parser-web.vercel.app/{channel_name}"
+        logger.info(f"📡 Запрос к RSS: {rss_url}")
         
-        # Пробуем получить JSON
-        json_url = f"{RSS_FEED_URL}?format=json"
-        response = requests.get(json_url, timeout=30)
+        feed = feedparser.parse(rss_url)
         
-        if response.status_code != 200:
-            logger.error(f"❌ Ошибка: {response.status_code}")
+        if not feed.entries:
+            logger.warning(f"⚠️ Нет постов в {channel_name}")
             return []
         
-        data = response.json()
+        items = []
+        for entry in feed.entries[:10]:
+            pub_date = None
+            if hasattr(entry, 'published_parsed'):
+                pub_date = datetime(*entry.published_parsed[:6])
+            
+            image_url = None
+            if hasattr(entry, 'media_content'):
+                for media in entry.media_content:
+                    if media.get('type', '').startswith('image'):
+                        image_url = media.get('url')
+                        break
+            
+            if not image_url and hasattr(entry, 'description'):
+                img_match = re.search(r'<img[^>]+src="([^"]+)"', entry.description)
+                if img_match:
+                    image_url = img_match.group(1)
+            
+            items.append({
+                'id': hashlib.md5(entry.link.encode()).hexdigest(),
+                'title': entry.title if hasattr(entry, 'title') else '',
+                'description': entry.description if hasattr(entry, 'description') else '',
+                'link': entry.link if hasattr(entry, 'link') else '',
+                'pubDate': pub_date,
+                'image_url': image_url,
+                'channel': channel_name
+            })
         
-        if not data:
-            logger.warning("⚠️ Нет данных в RSS")
-            return []
+        logger.info(f"✅ Получено {len(items)} постов из {channel_name}")
         
-        logger.info(f"📊 Получено {len(data)} постов")
+        logger.info(f"📋 Последние посты из {channel_name}:")
+        for i, item in enumerate(items[:5]):
+            title = item['title'][:50] if item['title'] else item['description'][:50]
+            date = item['pubDate'].strftime('%H:%M') if item['pubDate'] else 'нет даты'
+            logger.info(f"  [{i+1}] {date}: {title}...")
         
-        # Показываем последние 5 постов
-        logger.info("📋 Последние 5 постов:")
-        for i, item in enumerate(data[:5]):
-            title = item.get('title', '')[:50]
-            pub_date = item.get('pubDate', '')
-            channel = item.get('channel', '')
-            logger.info(f"  [{i+1}] {channel}: {title}... ({pub_date})")
-        
-        return data
+        return items
         
     except Exception as e:
-        logger.error(f"❌ Ошибка получения RSS: {e}")
+        logger.error(f"❌ Ошибка получения RSS для {channel_name}: {e}")
         return []
 
 def download_image(url):
@@ -320,20 +341,6 @@ def download_image(url):
         logger.error(f"❌ Ошибка скачивания: {e}")
     return None
 
-def parse_date(date_str):
-    """Парсинг даты из RSS"""
-    if not date_str:
-        return None
-    try:
-        # Пробуем парсить RFC 822
-        return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %z')
-    except:
-        try:
-            # Пробуем ISO
-            return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-        except:
-            return None
-
 # ==================== ОСНОВНОЙ БОТ ====================
 
 class RSSBot:
@@ -345,47 +352,41 @@ class RSSBot:
         
     async def check_channels(self):
         logger.info("="*60)
-        logger.info("🔍 ПРОВЕРКА RSS")
+        logger.info("🔍 ПРОВЕРКА КАНАЛОВ (RSS)")
         logger.info("="*60)
-        
-        items = get_rss_items()
-        
-        if not items:
-            logger.info("ℹ️ НЕТ ПОСТОВ В RSS")
-            return
         
         new_posts = 0
         
-        for item in items:
+        for channel in SOURCE_CHANNEL_LIST:
+            logger.info(f"\n📢 Канал: {channel}")
+            
             try:
-                # Создаем ID поста
-                post_id = hashlib.md5(f"{item.get('guid', '')}{item.get('title', '')}".encode()).hexdigest()
-                channel = item.get('channel', 'unknown')
+                items = get_rss_items_for_channel(channel)
                 
-                # Проверяем дату
-                pub_date = parse_date(item.get('pubDate', ''))
-                if pub_date:
-                    now = datetime.now(pub_date.tzinfo) if pub_date.tzinfo else datetime.now()
-                    age_minutes = (now - pub_date).total_seconds() / 60
-                    
+                if not items:
+                    logger.info(f"⏭️ Нет постов в {channel}")
+                    continue
+                
+                latest_item = items[0]
+                
+                if latest_item.get('pubDate'):
+                    age_minutes = (datetime.now() - latest_item['pubDate']).total_seconds() / 60
                     if age_minutes > MAX_POST_AGE_MINUTES:
                         logger.info(f"⏭️ Пост старый ({age_minutes:.1f} мин) - пропускаем")
                         continue
                 
-                # Проверяем, не обработан ли уже
-                if post_id in self.last_posts.get(channel, []):
-                    logger.info(f"⏭️ Пост уже обработан ({channel})")
+                if latest_item['id'] in self.last_posts.get(channel, []):
+                    logger.info(f"⏭️ Пост уже обработан")
                     continue
                 
                 logger.info(f"✨ НОВЫЙ ПОСТ в {channel}!")
                 new_posts += 1
                 
-                await self.process_post(item, post_id, channel)
+                await self.process_post(latest_item, channel)
                 
-                # Сохраняем ID
                 if channel not in self.last_posts:
                     self.last_posts[channel] = []
-                self.last_posts[channel].append(post_id)
+                self.last_posts[channel].append(latest_item['id'])
                 
                 if len(self.last_posts[channel]) > 50:
                     self.last_posts[channel] = self.last_posts[channel][-50:]
@@ -394,7 +395,7 @@ class RSSBot:
                 logger.info(f"💾 Сохранено в историю")
                 
             except Exception as e:
-                logger.error(f"❌ Ошибка: {e}")
+                logger.error(f"❌ Ошибка {channel}: {e}")
         
         logger.info("="*60)
         if new_posts == 0:
@@ -403,27 +404,16 @@ class RSSBot:
             logger.info(f"✅ ОБРАБОТАНО {new_posts} ПОСТОВ")
         logger.info("="*60)
     
-    async def process_post(self, item, post_id, channel):
+    async def process_post(self, item, channel):
         try:
-            # Текст поста
-            description = item.get('description', '')
-            title = item.get('title', '')
-            
-            # Берем полный текст
-            full_text = description if description else title
-            
-            # Заголовок для фото
+            full_text = item.get('description') or item.get('title') or ""
             photo_title = extract_title(full_text)
             
             logger.info(f"🔄 ОБРАБОТКА:")
             logger.info(f"   📝 Текст: {full_text[:150]}..." if len(full_text) > 150 else f"   📝 Текст: {full_text}")
             logger.info(f"   🏷️ Заголовок: {photo_title}")
             
-            # Проверяем, есть ли изображение
-            image_url = item.get('image', {}).get('url') if isinstance(item.get('image'), dict) else None
-            if not image_url:
-                # Пробуем найти image в корне
-                image_url = item.get('image_url') or item.get('image')
+            image_url = item.get('image_url')
             
             if image_url:
                 logger.info("📸 Есть фото, обрабатываем...")
@@ -440,7 +430,6 @@ class RSSBot:
                     logger.info("✅ ФОТО ОТПРАВЛЕНО!")
                     return
             
-            # Только текст
             if full_text:
                 logger.info("📝 Только текст")
                 await self.bot.send_message(
@@ -458,8 +447,8 @@ class RSSBot:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = sum(len(v) for v in bot.last_posts.values())
     await update.message.reply_text(
-        f"🤖 <b>Бот для репоста (RSS Aggregator)</b>\n\n"
-        f"📡 RSS: <code>{RSS_FEED_URL}</code>\n"
+        f"🤖 <b>Бот для репоста (RSS)</b>\n\n"
+        f"📢 Каналы: {', '.join(SOURCE_CHANNEL_LIST)}\n"
         f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
         f"⏱ Интервал: {CHECK_INTERVAL}с\n"
         f"⏳ Макс. возраст: {MAX_POST_AGE_MINUTES} мин\n"
@@ -501,8 +490,8 @@ async def main():
     bot = RSSBot()
     
     logger.info("="*60)
-    logger.info("🚀 БОТ ЗАПУСКАЕТСЯ (RSS Aggregator)")
-    logger.info(f"📡 RSS URL: {RSS_FEED_URL}")
+    logger.info("🚀 БОТ ЗАПУСКАЕТСЯ (RSS)")
+    logger.info(f"📢 Каналы: {SOURCE_CHANNEL_LIST}")
     logger.info(f"⏱ Интервал: {CHECK_INTERVAL}с")
     logger.info(f"⏳ Макс. возраст: {MAX_POST_AGE_MINUTES} мин")
     logger.info("="*60)
