@@ -10,13 +10,14 @@ from io import BytesIO
 from datetime import datetime, timedelta
 import time
 import hashlib
+import json
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telegram import Bot, Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 import asyncio
-from typing import Optional  # ← ЭТО ДОБАВИТЬ!
+from typing import Optional
 
 # ==================== НАСТРОЙКИ ====================
 
@@ -51,8 +52,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Хранилище обработанных постов
-processed_posts = set()
+# Файл для хранения последних обработанных постов
+LAST_POSTS_FILE = "last_posts.json"
+
+# ==================== РАБОТА С ПОСЛЕДНИМИ ПОСТАМИ ====================
+
+def load_last_posts():
+    """Загрузка последних обработанных постов"""
+    try:
+        if os.path.exists(LAST_POSTS_FILE):
+            with open(LAST_POSTS_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get('posts', {})
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки last_posts: {e}")
+    return {}
+
+def save_last_posts(posts: dict):
+    """Сохранение последних обработанных постов"""
+    try:
+        with open(LAST_POSTS_FILE, 'w') as f:
+            json.dump({'posts': posts}, f)
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения last_posts: {e}")
 
 # ==================== ШРИФТЫ ====================
 
@@ -236,9 +258,11 @@ def clean_title_for_card(title: str) -> str:
     return clean.strip()
 
 def extract_title_from_text(text: str) -> str:
+    """Извлечение заголовка из текста для наложения на фото"""
     if not text:
         return ""
     
+    # Удаляем эмодзи
     emoji_pattern = re.compile(
         "["
         "\U0001F600-\U0001F64F"
@@ -258,23 +282,18 @@ def extract_title_from_text(text: str) -> str:
     )
     clean_text = emoji_pattern.sub('', text).strip()
     
+    # Берем первую строку как заголовок
     if '\n' in clean_text:
-        lines = clean_text.split('\n')
-        title = lines[0].strip()
-        if len(title) > 200:
-            title = title[:197] + "..."
-        return title
+        title = clean_text.split('\n')[0].strip()
+    else:
+        # Если нет переноса, берем первые 200 символов
+        title = clean_text[:200].strip()
     
-    if '. ' in clean_text and len(clean_text) > 100:
-        parts = clean_text.split('. ', 1)
-        title = (parts[0] + '.').strip()
-        if len(title) > 200:
-            title = title[:197] + "..."
-        return title
+    # Обрезаем слишком длинный заголовок
+    if len(title) > 200:
+        title = title[:197] + "..."
     
-    if len(clean_text) > 200:
-        return clean_text[:197] + "..."
-    return clean_text
+    return title
 
 def process_image(img: Image.Image, title_text: str) -> Image.Image:
     try:
@@ -361,12 +380,6 @@ def get_channel_posts(channel_name: str, limit: int = 10):
                     if match:
                         img_url = match.group(1)
                 
-                # Видео
-                video_elem = post.find('video', class_='tgme_widget_message_video')
-                video_url = None
-                if video_elem:
-                    video_url = video_elem.get('src')
-                
                 # Создаем уникальный ID поста
                 post_id = hashlib.md5(f"{text}{date_str}".encode()).hexdigest()
                 
@@ -375,7 +388,6 @@ def get_channel_posts(channel_name: str, limit: int = 10):
                     'text': text,
                     'date': date_str,
                     'image_url': img_url,
-                    'video_url': video_url,
                     'channel': channel_name
                 })
                 
@@ -406,47 +418,63 @@ class RSSBot:
     def __init__(self):
         self.bot = Bot(token=BOT_TOKEN)
         self.target_chat = TARGET_CHANNEL_ID
-        self.processed = set()
+        self.last_posts = load_last_posts()
         
     async def check_channels(self):
         """Проверка всех каналов на новые посты"""
         logger.info("🔍 Проверка каналов...")
+        new_posts_found = False
         
         for channel in SOURCE_CHANNEL_LIST:
             try:
                 posts = get_channel_posts(channel, limit=5)
                 
-                for post in posts:
-                    if post['id'] in self.processed:
+                # Проходим по постам (сначала новые)
+                for post in reversed(posts):
+                    post_id = post['id']
+                    
+                    # Проверяем, обрабатывали ли этот пост
+                    if post_id in self.last_posts.get(channel, []):
                         continue
                     
                     logger.info(f"📨 Новый пост в канале {channel}")
+                    new_posts_found = True
                     
                     # Обрабатываем пост
-                    await self.process_post(post)
+                    await self.process_post(post, channel)
                     
                     # Добавляем в обработанные
-                    self.processed.add(post['id'])
+                    if channel not in self.last_posts:
+                        self.last_posts[channel] = []
+                    self.last_posts[channel].append(post_id)
                     
-                # Очищаем старые ID (чтобы не переполнять память)
-                if len(self.processed) > 1000:
-                    self.processed = set(list(self.processed)[-500:])
+                    # Оставляем только последние 50 ID
+                    if len(self.last_posts[channel]) > 50:
+                        self.last_posts[channel] = self.last_posts[channel][-50:]
+                    
+                    # Сохраняем
+                    save_last_posts(self.last_posts)
                     
             except Exception as e:
                 logger.error(f"❌ Ошибка проверки канала {channel}: {e}")
+        
+        if not new_posts_found:
+            logger.info("ℹ️ Новых постов нет")
     
-    async def process_post(self, post: dict):
+    async def process_post(self, post: dict, channel: str):
         """Обработка поста"""
         try:
             text = post.get('text', '')
             title = extract_title_from_text(text)
             
-            # Если есть изображение
+            # Если есть изображение - обрабатываем
             if post.get('image_url'):
                 logger.info(f"📸 Обработка фото из поста")
                 img_data = download_image(post['image_url'])
                 if img_data:
                     processed = process_photo_bytes(img_data, title)
+                    
+                    # Отправляем фото с заголовком, но оригинальный текст как подпись
                     caption = text[:1024] if text else ""
                     
                     await self.bot.send_photo(
@@ -458,7 +486,7 @@ class RSSBot:
                     logger.info(f"✅ Фото отправлено в канал")
                     return
             
-            # Если только текст
+            # Если только текст - отправляем как есть
             if text:
                 logger.info(f"📝 Текстовый пост")
                 await self.bot.send_message(
@@ -478,15 +506,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 <b>Бот для репоста через RSS</b>\n\n"
         f"📢 Каналы-источники: {', '.join(SOURCE_CHANNEL_LIST)}\n"
         f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
-        f"⏱ Интервал проверки: {CHECK_INTERVAL}с\n\n"
+        f"⏱ Интервал проверки: {CHECK_INTERVAL}с\n"
+        f"📊 Обработано постов: {sum(len(v) for v in bot.last_posts.values())}\n\n"
         f"✅ <b>Бот работает!</b>",
         parse_mode="HTML"
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total = sum(len(v) for v in bot.last_posts.values())
     await update.message.reply_text(
         f"📊 <b>Статистика</b>\n\n"
-        f"📨 Обработано постов: {len(bot.processed)}\n"
+        f"📨 Обработано постов: {total}\n"
         f"📢 Каналов: {len(SOURCE_CHANNEL_LIST)}\n"
         f"⏱ Интервал: {CHECK_INTERVAL}с\n"
         f"✅ Бот работает!",
@@ -529,6 +559,9 @@ async def main():
     )
     
     logger.info("🟢 Бот запущен!")
+    
+    # Первая проверка с задержкой
+    await asyncio.sleep(5)
     
     # Основной цикл проверки
     while True:
