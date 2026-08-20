@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telegram import Bot, Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 import asyncio
+from typing import Optional  # ← ЭТО ДОБАВИТЬ!
 
 # ==================== НАСТРОЙКИ ====================
 
