@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  repost-bot:
+    build: .
+    container_name: telegram-repost-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - SOURCE_CHANNEL_IDS=${SOURCE_CHANNEL_IDS}
+      - TARGET_CHANNEL_ID=${TARGET_CHANNEL_ID}
+    volumes:
+      - ./bot.log:/app/bot.log
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
