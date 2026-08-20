@@ -1,6 +1,8 @@
-python-telegram-bot==20.7
+telethon>=1.28.5
 Pillow==10.1.0
 moviepy==1.0.3
 requests==2.31.0
 numpy==1.26.0
 ffmpeg-python==0.2.0
+python-dotenv>=1.0.0
+httpx>=0.25.0
