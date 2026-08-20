@@ -345,7 +345,7 @@ def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
 # ==================== ПАРСИНГ RSS ====================
 
 def get_channel_posts(channel_name: str, limit: int = 3):
-    """Получение постов из канала через RSS (только последние 3)"""
+    """Получение последних постов из канала через RSS"""
     try:
         url = f"https://t.me/s/{channel_name}"
         logger.info(f"📡 Парсинг канала: {channel_name}")
@@ -360,10 +360,9 @@ def get_channel_posts(channel_name: str, limit: int = 3):
         soup = BeautifulSoup(response.text, 'html.parser')
         posts = []
         
-        # Находим все посты (берем только последние limit штук)
+        # Находим все посты
         all_posts = soup.find_all('div', class_='tgme_widget_message')
         
-        # Проверяем дату каждого поста
         for post in all_posts[:limit]:
             try:
                 # Текст поста
@@ -374,17 +373,6 @@ def get_channel_posts(channel_name: str, limit: int = 3):
                 date_elem = post.find('time', class_='tgme_widget_message_date')
                 date_str = date_elem.get('datetime') if date_elem else None
                 
-                # Если дата есть и она старше 24 часов - пропускаем
-                if date_str:
-                    try:
-                        post_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                        now = datetime.now(post_date.tzinfo)
-                        if (now - post_date).days > 1:
-                            logger.info(f"⏭️ Пропускаем старый пост от {date_str}")
-                            continue
-                    except:
-                        pass
-                
                 # Изображение
                 img_elem = post.find('a', class_='tgme_widget_message_photo_wrap')
                 img_url = None
@@ -394,7 +382,7 @@ def get_channel_posts(channel_name: str, limit: int = 3):
                     if match:
                         img_url = match.group(1)
                 
-                # Создаем уникальный ID поста
+                # Создаем уникальный ID поста на основе текста и даты
                 post_id = hashlib.md5(f"{text}{date_str}".encode()).hexdigest()
                 
                 posts.append({
@@ -409,7 +397,7 @@ def get_channel_posts(channel_name: str, limit: int = 3):
                 logger.error(f"❌ Ошибка парсинга поста: {e}")
                 continue
         
-        logger.info(f"✅ Найдено {len(posts)} новых постов в канале {channel_name}")
+        logger.info(f"✅ Найдено {len(posts)} постов в канале {channel_name}")
         return posts
         
     except Exception as e:
@@ -426,6 +414,16 @@ def download_image(url: str) -> Optional[bytes]:
         logger.error(f"❌ Ошибка скачивания изображения: {e}")
     return None
 
+def parse_date(date_str: str) -> Optional[datetime]:
+    """Парсинг даты из строки"""
+    try:
+        if not date_str:
+            return None
+        # Убираем 'Z' и парсим
+        return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+    except:
+        return None
+
 # ==================== ОСНОВНОЙ БОТ ====================
 
 class RSSBot:
@@ -433,57 +431,72 @@ class RSSBot:
         self.bot = Bot(token=BOT_TOKEN)
         self.target_chat = TARGET_CHANNEL_ID
         self.last_posts = load_last_posts()
-        self.first_run = True
+        self.last_check_time = {}  # Время последней проверки для каждого канала
         
     async def check_channels(self):
         """Проверка всех каналов на новые посты"""
         logger.info("🔍 Проверка каналов...")
-        new_posts_found = False
+        new_posts_found = 0
         
         for channel in SOURCE_CHANNEL_LIST:
             try:
-                # Получаем только последние 3 поста
+                # Получаем последние посты
                 posts = get_channel_posts(channel, limit=3)
                 
-                # Проходим по постам (сначала новые)
-                for post in reversed(posts):
-                    post_id = post['id']
-                    
-                    # Проверяем, обрабатывали ли этот пост
-                    if post_id in self.last_posts.get(channel, []):
+                if not posts:
+                    continue
+                
+                # Берем САМЫЙ СВЕЖИЙ пост (первый в списке)
+                latest_post = posts[0]
+                
+                # Проверяем дату поста
+                post_date = parse_date(latest_post.get('date'))
+                if post_date:
+                    # Если пост старше 5 минут - пропускаем (это старый пост)
+                    time_diff = (datetime.now(post_date.tzinfo) - post_date).total_seconds()
+                    if time_diff > 300:  # 5 минут
+                        logger.info(f"⏭️ Пост в канале {channel} старый ({int(time_diff/60)} мин), пропускаем")
                         continue
-                    
-                    logger.info(f"📨 Новый пост в канале {channel}")
-                    new_posts_found = True
-                    
-                    # Обрабатываем пост
-                    await self.process_post(post, channel)
-                    
-                    # Добавляем в обработанные
-                    if channel not in self.last_posts:
-                        self.last_posts[channel] = []
-                    self.last_posts[channel].append(post_id)
-                    
-                    # Оставляем только последние 50 ID
-                    if len(self.last_posts[channel]) > 50:
-                        self.last_posts[channel] = self.last_posts[channel][-50:]
-                    
-                    # Сохраняем
-                    save_last_posts(self.last_posts)
+                
+                # Проверяем, обрабатывали ли этот пост
+                post_id = latest_post['id']
+                if post_id in self.last_posts.get(channel, []):
+                    logger.info(f"ℹ️ Пост в канале {channel} уже обработан")
+                    continue
+                
+                logger.info(f"📨 НОВЫЙ пост в канале {channel}")
+                new_posts_found += 1
+                
+                # Обрабатываем пост
+                await self.process_post(latest_post, channel)
+                
+                # Добавляем в обработанные
+                if channel not in self.last_posts:
+                    self.last_posts[channel] = []
+                self.last_posts[channel].append(post_id)
+                
+                # Оставляем только последние 50 ID
+                if len(self.last_posts[channel]) > 50:
+                    self.last_posts[channel] = self.last_posts[channel][-50:]
+                
+                # Сохраняем
+                save_last_posts(self.last_posts)
                     
             except Exception as e:
                 logger.error(f"❌ Ошибка проверки канала {channel}: {e}")
         
-        if not new_posts_found and not self.first_run:
+        if new_posts_found == 0:
             logger.info("ℹ️ Новых постов нет")
-        
-        self.first_run = False
+        else:
+            logger.info(f"✅ Обработано {new_posts_found} новых постов")
     
     async def process_post(self, post: dict, channel: str):
         """Обработка поста"""
         try:
             text = post.get('text', '')
             title = extract_title_from_text(text)
+            
+            logger.info(f"📝 Текст: {text[:100]}..." if len(text) > 100 else f"📝 Текст: {text}")
             
             # Если есть изображение - обрабатываем
             if post.get('image_url'):
@@ -492,7 +505,7 @@ class RSSBot:
                 if img_data:
                     processed = process_photo_bytes(img_data, title)
                     
-                    # Отправляем фото с заголовком, но оригинальный текст как подпись
+                    # Отправляем фото с заголовком, оригинальный текст как подпись
                     caption = text[:1024] if text else ""
                     
                     await self.bot.send_photo(
@@ -527,17 +540,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
         f"⏱ Интервал проверки: {CHECK_INTERVAL}с\n"
         f"📊 Обработано постов: {total}\n\n"
-        f"✅ <b>Бот работает!</b>",
+        f"✅ <b>Бот работает!</b>\n"
+        f"📌 Команды:\n"
+        f"/stats - статистика\n"
+        f"/check - принудительная проверка\n"
+        f"/reset - сброс истории",
         parse_mode="HTML"
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = sum(len(v) for v in bot.last_posts.values())
+    channels_info = ""
+    for ch in SOURCE_CHANNEL_LIST:
+        count = len(bot.last_posts.get(ch, []))
+        channels_info += f"  • {ch}: {count} постов\n"
+    
     await update.message.reply_text(
         f"📊 <b>Статистика</b>\n\n"
-        f"📨 Обработано постов: {total}\n"
+        f"📨 Всего обработано: {total}\n"
         f"📢 Каналов: {len(SOURCE_CHANNEL_LIST)}\n"
         f"⏱ Интервал: {CHECK_INTERVAL}с\n"
+        f"\n<b>По каналам:</b>\n{channels_info}\n"
         f"✅ Бот работает!",
         parse_mode="HTML"
     )
