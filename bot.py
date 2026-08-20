@@ -1,16 +1,8 @@
 # -*- coding: utf-8 -*-
 
-import os
-import re
-import logging
-import sys
-import asyncio
-import tempfile
 import subprocess
-from io import BytesIO
-from typing import Optional, List, Dict
-from datetime import datetime
-import traceback
+import sys
+import os
 
 # ==================== АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ ====================
 
@@ -25,23 +17,40 @@ def install_dependencies():
         "ffmpeg-python==0.2.0",
         "python-dotenv>=1.0.0"
     ]
+    
     for dep in deps:
         try:
-            package_name = dep.split("==")[0].replace("-", "_")
+            # Проверяем, установлен ли пакет
+            package_name = dep.split("==")[0].split(">=")[0].replace("-", "_")
             __import__(package_name)
+            print(f"✅ {package_name} уже установлен")
         except ImportError:
             print(f"📦 Устанавливаем {dep}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
 
+# Устанавливаем зависимости ПЕРЕД импортами
 install_dependencies()
 
 # ==================== ИМПОРТЫ ====================
+
+import re
+import logging
+import asyncio
+import tempfile
+from io import BytesIO
+from typing import Optional, List, Dict
+from datetime import datetime
+import traceback
 
 import requests
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telethon import TelegramClient, events, errors
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+from dotenv import load_dotenv
+
+# Загрузка .env
+load_dotenv()
 
 try:
     from moviepy import VideoFileClip
@@ -463,7 +472,6 @@ def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
 
 class RepostBot:
     def __init__(self):
-        # UserBot для чтения каналов
         self.client = TelegramClient('session', API_ID, API_HASH)
         self.source_entities = []
         self.target_chat_id = TARGET_CHANNEL_ID
@@ -491,18 +499,15 @@ class RepostBot:
                     logger.info("💡 Убедитесь, что вы подписаны на канал")
                     return
             
-            # Проверяем целевой канал (через Bot API)
-            logger.info(f"🔍 Проверка целевого канала: {self.target_chat_id}")
+            logger.info(f"🟢 Бот запущен! Отслеживается {len(self.source_entities)} каналов")
+            logger.info(f"📤 Публикация будет в канал: {self.target_chat_id}")
+            logger.info("💡 Для остановки нажмите Ctrl+C")
             
             # Регистрируем обработчики для каждого канала
             for entity in self.source_entities:
                 @self.client.on(events.NewMessage(chats=entity))
                 async def handler(event):
                     await self.handle_new_message(event)
-            
-            logger.info(f"🟢 Бот запущен! Отслеживается {len(self.source_entities)} каналов")
-            logger.info(f"📤 Публикация будет в канал: {self.target_chat_id}")
-            logger.info("💡 Для остановки нажмите Ctrl+C")
             
             await self.client.run_until_disconnected()
             
@@ -519,28 +524,22 @@ class RepostBot:
             if not message:
                 return
             
-            # Проверяем, есть ли текст или медиа
             if not message.text and not message.media:
                 return
             
-            # Получаем текст
             text = message.text or message.caption or ""
             title = extract_title_from_text(text)
             
             logger.info(f"📨 Новый пост из канала {event.chat.title}")
             logger.info(f"📝 Заголовок: {title[:50] if title else 'нет'}")
             
-            # Обработка фото
             if message.photo:
                 logger.info(f"📸 Обработка фото")
                 try:
                     photo_data = await message.download_media(bytes)
                     if photo_data:
                         processed = process_photo_bytes(photo_data, title)
-                        
-                        # Отправляем через Bot API (используем requests)
                         await self.send_photo_via_bot(processed, text)
-                        
                         stats['processed'] += 1
                         stats['last_post'] = f"Фото в {datetime.now().strftime('%H:%M:%S')}"
                         logger.info(f"✅ Фото отправлено в канал")
@@ -548,17 +547,13 @@ class RepostBot:
                     logger.error(f"❌ Ошибка обработки фото: {e}")
                 return
             
-            # Обработка видео
             if message.video:
                 logger.info(f"📹 Обработка видео")
                 try:
                     video_data = await message.download_media(bytes)
                     if video_data:
                         processed = process_video_bytes(video_data, title)
-                        
-                        # Отправляем через Bot API
                         await self.send_video_via_bot(processed, text)
-                        
                         stats['processed'] += 1
                         stats['last_post'] = f"Видео в {datetime.now().strftime('%H:%M:%S')}"
                         logger.info(f"✅ Видео отправлено в канал")
@@ -566,7 +561,6 @@ class RepostBot:
                     logger.error(f"❌ Ошибка обработки видео: {e}")
                 return
             
-            # Текстовый пост
             if text:
                 logger.info(f"📝 Текстовый пост")
                 await self.send_text_via_bot(text)
@@ -583,9 +577,7 @@ class RepostBot:
         import httpx
         
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        files = {
-            'photo': ('photo.png', photo_bytes, 'image/png')
-        }
+        files = {'photo': ('photo.png', photo_bytes, 'image/png')}
         data = {
             'chat_id': self.target_chat_id,
             'caption': caption[:1024] if caption else '',
@@ -602,9 +594,7 @@ class RepostBot:
         import httpx
         
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-        files = {
-            'video': ('video.mp4', video_bytes, 'video/mp4')
-        }
+        files = {'video': ('video.mp4', video_bytes, 'video/mp4')}
         data = {
             'chat_id': self.target_chat_id,
             'caption': caption[:1024] if caption else '',
