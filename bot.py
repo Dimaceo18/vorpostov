@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import asyncio
+import signal
 
 # ==================== НАСТРОЙКИ ====================
 
@@ -276,7 +277,7 @@ def process_photo_bytes(photo_bytes, title_text):
 # ==================== ПАРСИНГ КАНАЛА ====================
 
 def get_latest_post(channel_name):
-    """Получение ТОЛЬКО ПОСЛЕДНЕГО поста с ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ"""
+    """Получение ТОЛЬКО ПОСЛЕДНЕГО поста с детальным логированием"""
     try:
         url = f"https://t.me/s/{channel_name}"
         logger.info(f"📡 Парсинг {channel_name}...")
@@ -295,31 +296,53 @@ def get_latest_post(channel_name):
             logger.warning(f"⚠️ Постов не найдено в {channel_name}")
             return None
         
-        # Показываем ВСЕ посты в логах
         logger.info(f"📊 Всего найдено постов: {len(all_posts)}")
         
-        # Берем ПЕРВЫЙ пост (самый свежий)
-        post = all_posts[0]
-        
-        # Показываем 5 последних постов для понимания
+        # Показываем последние 5 постов
         logger.info("📋 Последние 5 постов в канале:")
         for i, p in enumerate(all_posts[:5]):
             try:
                 text_elem = p.find('div', class_='tgme_widget_message_text')
                 text = text_elem.get_text()[:50] if text_elem else "(без текста)"
+                
                 date_elem = p.find('time', class_='tgme_widget_message_date')
-                date_str = date_elem.get('datetime') if date_elem else "нет даты"
-                logger.info(f"  [{i+1}] {date_str}: {text}...")
+                date_str = date_elem.get('datetime') if date_elem else None
+                
+                if not date_str:
+                    time_tag = p.find('time')
+                    if time_tag and time_tag.get('datetime'):
+                        date_str = time_tag.get('datetime')
+                    elif time_tag and time_tag.get('data-datetime'):
+                        date_str = time_tag.get('data-datetime')
+                
+                logger.info(f"  [{i+1}] {date_str or 'нет даты'}: {text}...")
             except:
-                logger.info(f"  [{i+1}] (ошибка парсинга)")
+                logger.info(f"  [{i+1}] (ошибка)")
+        
+        # Берем ПЕРВЫЙ пост (самый свежий)
+        post = all_posts[0]
         
         try:
             text_elem = post.find('div', class_='tgme_widget_message_text')
             text = text_elem.get_text() if text_elem else ""
             
+            # Улучшенный парсинг даты
+            date_str = None
             date_elem = post.find('time', class_='tgme_widget_message_date')
-            date_str = date_elem.get('datetime') if date_elem else None
+            if date_elem:
+                date_str = date_elem.get('datetime')
             
+            if not date_str:
+                time_tags = post.find_all('time')
+                for t in time_tags:
+                    if t.get('datetime'):
+                        date_str = t.get('datetime')
+                        break
+                    elif t.get('data-datetime'):
+                        date_str = t.get('data-datetime')
+                        break
+            
+            # Изображение
             img_elem = post.find('a', class_='tgme_widget_message_photo_wrap')
             img_url = None
             if img_elem and img_elem.get('style'):
@@ -328,11 +351,15 @@ def get_latest_post(channel_name):
                 if match:
                     img_url = match.group(1)
             
+            if not img_url:
+                img_tag = post.find('img', class_='tgme_widget_message_photo')
+                if img_tag and img_tag.get('src'):
+                    img_url = img_tag.get('src')
+            
             post_id = hashlib.md5(f"{text}{date_str}".encode()).hexdigest()
             
-            # ДЕТАЛЬНЫЙ ЛОГ ВЫБРАННОГО ПОСТА
             logger.info(f"🎯 ВЫБРАН пост для обработки:")
-            logger.info(f"   📅 Дата: {date_str}")
+            logger.info(f"   📅 Дата: {date_str or 'не найдена'}")
             logger.info(f"   📝 Текст (первые 100 символов): {text[:100]}...")
             logger.info(f"   🖼️  Есть фото: {'ДА' if img_url else 'НЕТ'}")
             logger.info(f"   🆔 ID: {post_id[:16]}...")
@@ -369,6 +396,11 @@ class RSSBot:
         self.bot = Bot(token=BOT_TOKEN)
         self.target_chat = TARGET_CHANNEL_ID
         self.last_posts = load_last_posts()
+        self.running = True
+        
+    async def stop(self):
+        self.running = False
+        logger.info("🛑 Бот останавливается...")
         
     async def check_channels(self):
         logger.info("="*60)
@@ -388,7 +420,6 @@ class RSSBot:
                     logger.warning(f"⚠️ Не удалось получить пост из {channel}")
                     continue
                 
-                # Проверяем, обрабатывали ли этот пост
                 if post['id'] in self.last_posts.get(channel, []):
                     logger.info(f"⏭️ Пост УЖЕ обработан (ID: {post['id'][:16]}...)")
                     continue
@@ -396,15 +427,12 @@ class RSSBot:
                 logger.info(f"✨ НОВЫЙ пост в {channel} (ID: {post['id'][:16]}...)")
                 new_posts += 1
                 
-                # Обрабатываем
                 await self.process_post(post)
                 
-                # Сохраняем ID
                 if channel not in self.last_posts:
                     self.last_posts[channel] = []
                 self.last_posts[channel].append(post['id'])
                 
-                # Оставляем последние 50
                 if len(self.last_posts[channel]) > 50:
                     self.last_posts[channel] = self.last_posts[channel][-50:]
                 
@@ -430,7 +458,6 @@ class RSSBot:
             logger.info(f"   📝 Оригинальный текст: {text[:150]}..." if len(text) > 150 else f"   📝 Оригинальный текст: {text}")
             logger.info(f"   🏷️  Заголовок для фото: {title}")
             
-            # Если есть фото - обрабатываем
             if post.get('image_url'):
                 logger.info("📸 Есть фото, обрабатываем...")
                 img_data = download_image(post['image_url'])
@@ -446,7 +473,6 @@ class RSSBot:
                     logger.info("✅ ФОТО УСПЕШНО ОТПРАВЛЕНО В КАНАЛ!")
                     return
             
-            # Только текст
             if text:
                 logger.info("📝 Только текст, отправляем как есть")
                 await self.bot.send_message(
@@ -499,9 +525,10 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ЗАПУСК ====================
 
 async def main():
-    global bot
+    global bot, app
     
-    await asyncio.sleep(3)
+    logger.info("⏳ Ожидание завершения старых экземпляров (10 сек)...")
+    await asyncio.sleep(10)
     
     bot = RSSBot()
     
@@ -515,7 +542,11 @@ async def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    await app.bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook удален")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка удаления webhook: {e}")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
@@ -528,18 +559,22 @@ async def main():
     await app.updater.start_polling(
         allowed_updates=["message"],
         drop_pending_updates=True,
-        poll_interval=1.0
+        poll_interval=2.0,
+        timeout=60,
+        read_timeout=60,
+        write_timeout=60,
+        connect_timeout=60
     )
     
     logger.info("🟢 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
     
     await asyncio.sleep(5)
     
-    while True:
+    while bot.running:
         try:
             await bot.check_channels()
         except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка в цикле: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
@@ -548,3 +583,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен")
         sys.exit(0)
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        sys.exit(1)
