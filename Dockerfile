@@ -12,9 +12,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование кода бота
+# Копирование кода бота (БЕЗ .env!)
 COPY bot.py .
-COPY .env .env
 
 # Создание пользователя для запуска
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
