@@ -1,9 +1,10 @@
 {
   "name": "telegram-rss-aggregator",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Telegram RSS Aggregator for bot",
+  "main": "rss_aggregator.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node rss_aggregator.js"
   },
   "dependencies": {
     "telegram-rss": "^1.0.0",
