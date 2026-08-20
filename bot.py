@@ -344,8 +344,8 @@ def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
 
 # ==================== ПАРСИНГ RSS ====================
 
-def get_channel_posts(channel_name: str, limit: int = 10):
-    """Получение постов из канала через RSS"""
+def get_channel_posts(channel_name: str, limit: int = 3):
+    """Получение постов из канала через RSS (только последние 3)"""
     try:
         url = f"https://t.me/s/{channel_name}"
         logger.info(f"📡 Парсинг канала: {channel_name}")
@@ -360,8 +360,11 @@ def get_channel_posts(channel_name: str, limit: int = 10):
         soup = BeautifulSoup(response.text, 'html.parser')
         posts = []
         
-        # Находим все посты
-        for post in soup.find_all('div', class_='tgme_widget_message')[:limit]:
+        # Находим все посты (берем только последние limit штук)
+        all_posts = soup.find_all('div', class_='tgme_widget_message')
+        
+        # Проверяем дату каждого поста
+        for post in all_posts[:limit]:
             try:
                 # Текст поста
                 text_elem = post.find('div', class_='tgme_widget_message_text')
@@ -370,6 +373,17 @@ def get_channel_posts(channel_name: str, limit: int = 10):
                 # Дата
                 date_elem = post.find('time', class_='tgme_widget_message_date')
                 date_str = date_elem.get('datetime') if date_elem else None
+                
+                # Если дата есть и она старше 24 часов - пропускаем
+                if date_str:
+                    try:
+                        post_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                        now = datetime.now(post_date.tzinfo)
+                        if (now - post_date).days > 1:
+                            logger.info(f"⏭️ Пропускаем старый пост от {date_str}")
+                            continue
+                    except:
+                        pass
                 
                 # Изображение
                 img_elem = post.find('a', class_='tgme_widget_message_photo_wrap')
@@ -395,7 +409,7 @@ def get_channel_posts(channel_name: str, limit: int = 10):
                 logger.error(f"❌ Ошибка парсинга поста: {e}")
                 continue
         
-        logger.info(f"✅ Найдено {len(posts)} постов в канале {channel_name}")
+        logger.info(f"✅ Найдено {len(posts)} новых постов в канале {channel_name}")
         return posts
         
     except Exception as e:
@@ -419,6 +433,7 @@ class RSSBot:
         self.bot = Bot(token=BOT_TOKEN)
         self.target_chat = TARGET_CHANNEL_ID
         self.last_posts = load_last_posts()
+        self.first_run = True
         
     async def check_channels(self):
         """Проверка всех каналов на новые посты"""
@@ -427,7 +442,8 @@ class RSSBot:
         
         for channel in SOURCE_CHANNEL_LIST:
             try:
-                posts = get_channel_posts(channel, limit=5)
+                # Получаем только последние 3 поста
+                posts = get_channel_posts(channel, limit=3)
                 
                 # Проходим по постам (сначала новые)
                 for post in reversed(posts):
@@ -458,8 +474,10 @@ class RSSBot:
             except Exception as e:
                 logger.error(f"❌ Ошибка проверки канала {channel}: {e}")
         
-        if not new_posts_found:
+        if not new_posts_found and not self.first_run:
             logger.info("ℹ️ Новых постов нет")
+        
+        self.first_run = False
     
     async def process_post(self, post: dict, channel: str):
         """Обработка поста"""
@@ -502,12 +520,13 @@ class RSSBot:
 # ==================== КОМАНДЫ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total = sum(len(v) for v in bot.last_posts.values())
     await update.message.reply_text(
         f"🤖 <b>Бот для репоста через RSS</b>\n\n"
         f"📢 Каналы-источники: {', '.join(SOURCE_CHANNEL_LIST)}\n"
         f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
         f"⏱ Интервал проверки: {CHECK_INTERVAL}с\n"
-        f"📊 Обработано постов: {sum(len(v) for v in bot.last_posts.values())}\n\n"
+        f"📊 Обработано постов: {total}\n\n"
         f"✅ <b>Бот работает!</b>",
         parse_mode="HTML"
     )
@@ -529,10 +548,21 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await bot.check_channels()
     await update.message.reply_text("✅ Проверка завершена!")
 
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сброс истории обработанных постов"""
+    bot.last_posts = {}
+    save_last_posts({})
+    await update.message.reply_text("✅ История обработанных постов сброшена!")
+
 # ==================== ЗАПУСК ====================
 
 async def main():
     global bot
+    
+    # Ждем 5 секунд перед запуском, чтобы старый экземпляр успел завершиться
+    logger.info("⏳ Ожидание завершения старых экземпляров...")
+    await asyncio.sleep(5)
+    
     bot = RSSBot()
     
     logger.info("🚀 RSS Бот для репоста запускается...")
@@ -547,6 +577,7 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("check", check_now))
+    app.add_handler(CommandHandler("reset", reset))
     
     # Запускаем бота
     await app.initialize()
@@ -561,7 +592,7 @@ async def main():
     logger.info("🟢 Бот запущен!")
     
     # Первая проверка с задержкой
-    await asyncio.sleep(5)
+    await asyncio.sleep(3)
     
     # Основной цикл проверки
     while True:
