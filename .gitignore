@@ -11,3 +11,4 @@ bot.log
 # OS
 .DS_Store
 Thumbs.db
+last_posts.json
