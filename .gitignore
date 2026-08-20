@@ -1,14 +1,23 @@
 # Python
 __pycache__/
-*.py[cod]
-.env
-bot.log
-*.session
+*.pyc
 
-# Docker
+# Данные бота
 *.log
+*.session
+last_posts.json
+.env
 
-# OS
+# IDE
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
-last_posts.json
+
+# Шрифты (скачиваются автоматически)
+*.ttf
+*.otf
+
+# Временные файлы
+*.tmp
+temp_*
