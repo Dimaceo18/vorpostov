@@ -1,96 +1,40 @@
 # -*- coding: utf-8 -*-
 
-import subprocess
-import sys
 import os
-
-# ==================== АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ ====================
-
-def install_dependencies():
-    """Автоматическая установка всех зависимостей"""
-    deps = [
-        "telethon>=1.28.5",
-        "Pillow==10.1.0",
-        "moviepy==1.0.3",
-        "requests==2.31.0",
-        "numpy==1.26.0",
-        "ffmpeg-python==0.2.0",
-        "python-dotenv>=1.0.0"
-    ]
-    
-    for dep in deps:
-        try:
-            # Проверяем, установлен ли пакет
-            package_name = dep.split("==")[0].split(">=")[0].replace("-", "_")
-            __import__(package_name)
-            print(f"✅ {package_name} уже установлен")
-        except ImportError:
-            print(f"📦 Устанавливаем {dep}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
-
-# Устанавливаем зависимости ПЕРЕД импортами
-install_dependencies()
-
-# ==================== ИМПОРТЫ ====================
-
 import re
 import logging
-import asyncio
+import sys
 import tempfile
+import subprocess
 from io import BytesIO
-from typing import Optional, List, Dict
-from datetime import datetime
-import traceback
-
+from datetime import datetime, timedelta
+import time
+import hashlib
 import requests
-import numpy as np
+from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
-from telethon import TelegramClient, events, errors
-from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
-from dotenv import load_dotenv
+from telegram import Bot, Update, InputMediaPhoto, InputMediaVideo
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
+import asyncio
 
-# Загрузка .env
-load_dotenv()
+# ==================== НАСТРОЙКИ ====================
 
-try:
-    from moviepy import VideoFileClip
-except ImportError:
-    try:
-        from moviepy.video.io.VideoFileClip import VideoFileClip
-    except:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "moviepy==1.0.3"])
-        from moviepy.video.io.VideoFileClip import VideoFileClip
-
-# ==================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ====================
-
-# Для чтения каналов (UserBot)
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-PHONE_NUMBER = os.getenv("PHONE_NUMBER", "")
-
-# Для публикации (Bot)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
-# Каналы
-SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "")  # ID или username через запятую
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SOURCE_CHANNELS = os.getenv("SOURCE_CHANNELS", "")  # Имена каналов через запятую (без @)
 TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID", "")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))  # Секунд между проверками
 
-# Проверка обязательных переменных
-if not API_ID or not API_HASH:
-    raise ValueError("❌ API_ID и API_HASH обязательны! Получите на my.telegram.org")
-if not PHONE_NUMBER:
-    raise ValueError("❌ PHONE_NUMBER не настроен! Номер телефона аккаунта")
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не настроен! Получите у @BotFather")
+    raise ValueError("❌ BOT_TOKEN не настроен!")
 if not SOURCE_CHANNELS:
     raise ValueError("❌ SOURCE_CHANNELS не настроен!")
 if not TARGET_CHANNEL_ID:
     raise ValueError("❌ TARGET_CHANNEL_ID не настроен!")
 
-# Парсим каналы-источники
+# Парсим каналы
 SOURCE_CHANNEL_LIST = [x.strip() for x in SOURCE_CHANNELS.split(',') if x.strip()]
 
-# Настройки оформления
+# Стиль ЧП ВМ
 TARGET_W = int(os.getenv("TARGET_W", "720"))
 TARGET_H = int(os.getenv("TARGET_H", "900"))
 CHP_GRADIENT_PCT = float(os.getenv("CHP_GRADIENT_PCT", "0.48"))
@@ -98,12 +42,7 @@ MN_TITLE_ZONE_PCT = float(os.getenv("MN_TITLE_ZONE_PCT", "0.23"))
 BRIGHTNESS_FACTOR = float(os.getenv("BRIGHTNESS_FACTOR", "0.85"))
 FONT_CHP = os.getenv("FONT_CHP", "Montserrat-Black.ttf")
 
-# Настройки видео
-VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "5000k")
-VIDEO_PRESET = os.getenv("VIDEO_PRESET", "medium")
-KEEP_ORIGINAL_AUDIO = os.getenv("KEEP_ORIGINAL_AUDIO", "true").lower() == "true"
-
-# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
+# ==================== ЛОГИРОВАНИЕ ====================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,18 +50,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Статистика
-stats = {
-    "started_at": datetime.now(),
-    "processed": 0,
-    "errors": 0,
-    "last_post": None
-}
+# Хранилище обработанных постов
+processed_posts = set()
 
 # ==================== ШРИФТЫ ====================
 
 def download_fonts():
-    """Скачивание шрифтов"""
     fonts_urls = {
         "Montserrat-Black.ttf": "https://raw.githubusercontent.com/Dimaceo18/reporterbot/main/Montserrat-Black.ttf",
         "Arial.ttf": "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf",
@@ -142,7 +75,6 @@ def download_fonts():
                 logger.error(f"❌ Ошибка скачивания {font_name}: {e}")
 
 def load_font(font_name: str, size: int):
-    """Загрузка шрифта с fallback"""
     try:
         if os.path.exists("Montserrat-Black.ttf"):
             return ImageFont.truetype("Montserrat-Black.ttf", size=size)
@@ -390,250 +322,221 @@ def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
         logger.error(f"❌ Ошибка обработки фото: {e}")
         return BytesIO(photo_bytes)
 
-# ==================== ОБРАБОТКА ВИДЕО ====================
+# ==================== ПАРСИНГ RSS ====================
 
-def process_video_frame(frame: np.ndarray, title_text: str) -> np.ndarray:
+def get_channel_posts(channel_name: str, limit: int = 10):
+    """Получение постов из канала через RSS"""
     try:
-        img = Image.fromarray(frame).convert("RGB")
-        img = process_image(img, title_text)
-        return np.array(img)
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки кадра: {e}")
-        return frame
-
-def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
-    temp_input = None
-    temp_output = None
-    
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
-            f.write(video_bytes)
-            temp_input = f.name
+        url = f"https://t.me/s/{channel_name}"
+        logger.info(f"📡 Парсинг канала: {channel_name}")
         
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
-            temp_output = f.name
+        response = requests.get(url, timeout=30)
+        response.encoding = 'utf-8'
         
-        logger.info(f"📹 Загрузка видео...")
-        video = VideoFileClip(temp_input)
-        logger.info(f"📹 Видео загружено: {video.duration}с")
+        if response.status_code != 200:
+            logger.error(f"❌ Ошибка доступа к каналу: {response.status_code}")
+            return []
         
-        def process_frame(frame):
-            return process_video_frame(frame, title_text)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        posts = []
         
-        processed_video = video.fl_image(process_frame)
-        
-        if video.audio is not None and KEEP_ORIGINAL_AUDIO:
+        # Находим все посты
+        for post in soup.find_all('div', class_='tgme_widget_message')[:limit]:
             try:
-                processed_video = processed_video.set_audio(video.audio)
-                logger.info(f"✅ Аудио сохранено")
+                # Текст поста
+                text_elem = post.find('div', class_='tgme_widget_message_text')
+                text = text_elem.get_text() if text_elem else ""
+                
+                # Дата
+                date_elem = post.find('time', class_='tgme_widget_message_date')
+                date_str = date_elem.get('datetime') if date_elem else None
+                
+                # Изображение
+                img_elem = post.find('a', class_='tgme_widget_message_photo_wrap')
+                img_url = None
+                if img_elem and img_elem.get('style'):
+                    style = img_elem.get('style')
+                    match = re.search(r'background-image:url\(\'([^\']+)\'\)', style)
+                    if match:
+                        img_url = match.group(1)
+                
+                # Видео
+                video_elem = post.find('video', class_='tgme_widget_message_video')
+                video_url = None
+                if video_elem:
+                    video_url = video_elem.get('src')
+                
+                # Создаем уникальный ID поста
+                post_id = hashlib.md5(f"{text}{date_str}".encode()).hexdigest()
+                
+                posts.append({
+                    'id': post_id,
+                    'text': text,
+                    'date': date_str,
+                    'image_url': img_url,
+                    'video_url': video_url,
+                    'channel': channel_name
+                })
+                
             except Exception as e:
-                logger.error(f"❌ Ошибка сохранения аудио: {e}")
+                logger.error(f"❌ Ошибка парсинга поста: {e}")
+                continue
         
-        processed_video.write_videofile(
-            temp_output,
-            codec='libx264',
-            audio_codec='aac',
-            fps=video.fps,
-            bitrate=VIDEO_BITRATE,
-            threads=4,
-            preset=VIDEO_PRESET,
-            logger=None
-        )
-        
-        video.close()
-        processed_video.close()
-        
-        with open(temp_output, 'rb') as f:
-            result_bytes = f.read()
-        
-        logger.info(f"✅ Видео обработано! Размер: {len(result_bytes) / (1024*1024):.2f} MB")
-        
-        output = BytesIO()
-        output.write(result_bytes)
-        output.seek(0)
-        return output
+        logger.info(f"✅ Найдено {len(posts)} постов в канале {channel_name}")
+        return posts
         
     except Exception as e:
-        logger.error(f"❌ Ошибка при обработке видео: {e}")
-        output = BytesIO(video_bytes)
-        output.seek(0)
-        return output
-    
-    finally:
-        try:
-            if temp_input and os.path.exists(temp_input):
-                os.unlink(temp_input)
-            if temp_output and os.path.exists(temp_output):
-                os.unlink(temp_output)
-        except:
-            pass
+        logger.error(f"❌ Ошибка парсинга канала {channel_name}: {e}")
+        return []
 
-# ==================== ОСНОВНОЙ КОД БОТА ====================
+def download_image(url: str) -> Optional[bytes]:
+    """Скачивание изображения"""
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            return response.content
+    except Exception as e:
+        logger.error(f"❌ Ошибка скачивания изображения: {e}")
+    return None
 
-class RepostBot:
+# ==================== ОСНОВНОЙ БОТ ====================
+
+class RSSBot:
     def __init__(self):
-        self.client = TelegramClient('session', API_ID, API_HASH)
-        self.source_entities = []
-        self.target_chat_id = TARGET_CHANNEL_ID
+        self.bot = Bot(token=BOT_TOKEN)
+        self.target_chat = TARGET_CHANNEL_ID
+        self.processed = set()
         
-    async def start(self):
-        """Запуск бота"""
-        try:
-            # Подключаемся к Telegram через UserBot
-            await self.client.start(phone=PHONE_NUMBER)
-            logger.info("✅ Подключение к Telegram установлено (UserBot)")
-            
-            me = await self.client.get_me()
-            logger.info(f"👤 Аккаунт: {me.first_name} (@{me.username})")
-            
-            # Получаем сущности каналов-источников
-            logger.info("🔍 Получаем информацию о каналах...")
-            
-            for channel in SOURCE_CHANNEL_LIST:
-                try:
-                    entity = await self.client.get_entity(channel)
-                    self.source_entities.append(entity)
-                    logger.info(f"✅ Канал-источник: {entity.title} (ID: {entity.id})")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка доступа к каналу {channel}: {e}")
-                    logger.info("💡 Убедитесь, что вы подписаны на канал")
-                    return
-            
-            logger.info(f"🟢 Бот запущен! Отслеживается {len(self.source_entities)} каналов")
-            logger.info(f"📤 Публикация будет в канал: {self.target_chat_id}")
-            logger.info("💡 Для остановки нажмите Ctrl+C")
-            
-            # Регистрируем обработчики для каждого канала
-            for entity in self.source_entities:
-                @self.client.on(events.NewMessage(chats=entity))
-                async def handler(event):
-                    await self.handle_new_message(event)
-            
-            await self.client.run_until_disconnected()
-            
-        except errors.RPCError as e:
-            logger.error(f"❌ Ошибка RPC: {e}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            traceback.print_exc()
+    async def check_channels(self):
+        """Проверка всех каналов на новые посты"""
+        logger.info("🔍 Проверка каналов...")
+        
+        for channel in SOURCE_CHANNEL_LIST:
+            try:
+                posts = get_channel_posts(channel, limit=5)
+                
+                for post in posts:
+                    if post['id'] in self.processed:
+                        continue
+                    
+                    logger.info(f"📨 Новый пост в канале {channel}")
+                    
+                    # Обрабатываем пост
+                    await self.process_post(post)
+                    
+                    # Добавляем в обработанные
+                    self.processed.add(post['id'])
+                    
+                # Очищаем старые ID (чтобы не переполнять память)
+                if len(self.processed) > 1000:
+                    self.processed = set(list(self.processed)[-500:])
+                    
+            except Exception as e:
+                logger.error(f"❌ Ошибка проверки канала {channel}: {e}")
     
-    async def handle_new_message(self, event):
-        """Обработка нового сообщения"""
+    async def process_post(self, post: dict):
+        """Обработка поста"""
         try:
-            message = event.message
-            if not message:
-                return
-            
-            if not message.text and not message.media:
-                return
-            
-            text = message.text or message.caption or ""
+            text = post.get('text', '')
             title = extract_title_from_text(text)
             
-            logger.info(f"📨 Новый пост из канала {event.chat.title}")
-            logger.info(f"📝 Заголовок: {title[:50] if title else 'нет'}")
+            # Если есть изображение
+            if post.get('image_url'):
+                logger.info(f"📸 Обработка фото из поста")
+                img_data = download_image(post['image_url'])
+                if img_data:
+                    processed = process_photo_bytes(img_data, title)
+                    caption = text[:1024] if text else ""
+                    
+                    await self.bot.send_photo(
+                        chat_id=self.target_chat,
+                        photo=BytesIO(processed.getvalue()),
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"✅ Фото отправлено в канал")
+                    return
             
-            if message.photo:
-                logger.info(f"📸 Обработка фото")
-                try:
-                    photo_data = await message.download_media(bytes)
-                    if photo_data:
-                        processed = process_photo_bytes(photo_data, title)
-                        await self.send_photo_via_bot(processed, text)
-                        stats['processed'] += 1
-                        stats['last_post'] = f"Фото в {datetime.now().strftime('%H:%M:%S')}"
-                        logger.info(f"✅ Фото отправлено в канал")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка обработки фото: {e}")
-                return
-            
-            if message.video:
-                logger.info(f"📹 Обработка видео")
-                try:
-                    video_data = await message.download_media(bytes)
-                    if video_data:
-                        processed = process_video_bytes(video_data, title)
-                        await self.send_video_via_bot(processed, text)
-                        stats['processed'] += 1
-                        stats['last_post'] = f"Видео в {datetime.now().strftime('%H:%M:%S')}"
-                        logger.info(f"✅ Видео отправлено в канал")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка обработки видео: {e}")
-                return
-            
+            # Если только текст
             if text:
                 logger.info(f"📝 Текстовый пост")
-                await self.send_text_via_bot(text)
-                stats['processed'] += 1
-                stats['last_post'] = f"Текст в {datetime.now().strftime('%H:%M:%S')}"
+                await self.bot.send_message(
+                    chat_id=self.target_chat,
+                    text=text,
+                    parse_mode="HTML"
+                )
                 logger.info(f"✅ Текст отправлен в канал")
                 
         except Exception as e:
-            stats['errors'] += 1
-            logger.error(f"❌ Ошибка обработки сообщения: {e}")
+            logger.error(f"❌ Ошибка обработки поста: {e}")
 
-    async def send_photo_via_bot(self, photo_bytes: BytesIO, caption: str):
-        """Отправка фото через Bot API"""
-        import httpx
-        
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        files = {'photo': ('photo.png', photo_bytes, 'image/png')}
-        data = {
-            'chat_id': self.target_chat_id,
-            'caption': caption[:1024] if caption else '',
-            'parse_mode': 'HTML'
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, files=files, data=data)
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки фото: {response.text}")
+# ==================== КОМАНДЫ ====================
 
-    async def send_video_via_bot(self, video_bytes: BytesIO, caption: str):
-        """Отправка видео через Bot API"""
-        import httpx
-        
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo"
-        files = {'video': ('video.mp4', video_bytes, 'video/mp4')}
-        data = {
-            'chat_id': self.target_chat_id,
-            'caption': caption[:1024] if caption else '',
-            'parse_mode': 'HTML',
-            'width': TARGET_W,
-            'height': TARGET_H
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, files=files, data=data)
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки видео: {response.text}")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🤖 <b>Бот для репоста через RSS</b>\n\n"
+        f"📢 Каналы-источники: {', '.join(SOURCE_CHANNEL_LIST)}\n"
+        f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
+        f"⏱ Интервал проверки: {CHECK_INTERVAL}с\n\n"
+        f"✅ <b>Бот работает!</b>",
+        parse_mode="HTML"
+    )
 
-    async def send_text_via_bot(self, text: str):
-        """Отправка текста через Bot API"""
-        import httpx
-        
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data = {
-            'chat_id': self.target_chat_id,
-            'text': text,
-            'parse_mode': 'HTML'
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=data)
-            if response.status_code != 200:
-                logger.error(f"❌ Ошибка отправки текста: {response.text}")
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"📊 <b>Статистика</b>\n\n"
+        f"📨 Обработано постов: {len(bot.processed)}\n"
+        f"📢 Каналов: {len(SOURCE_CHANNEL_LIST)}\n"
+        f"⏱ Интервал: {CHECK_INTERVAL}с\n"
+        f"✅ Бот работает!",
+        parse_mode="HTML"
+    )
+
+async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принудительная проверка каналов"""
+    await update.message.reply_text("🔍 Начинаю проверку каналов...")
+    await bot.check_channels()
+    await update.message.reply_text("✅ Проверка завершена!")
 
 # ==================== ЗАПУСК ====================
 
 async def main():
-    logger.info("🚀 UserBot для репоста с оформлением ЧП ВМ запускается...")
-    logger.info(f"📊 Количество каналов-источников: {len(SOURCE_CHANNEL_LIST)}")
+    global bot
+    bot = RSSBot()
+    
+    logger.info("🚀 RSS Бот для репоста запускается...")
+    logger.info(f"📊 Каналы: {SOURCE_CHANNEL_LIST}")
+    logger.info(f"⏱ Интервал: {CHECK_INTERVAL}с")
     
     download_fonts()
     
-    bot = RepostBot()
-    await bot.start()
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Регистрируем команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("check", check_now))
+    
+    # Запускаем бота
+    await app.initialize()
+    await app.start()
+    
+    await app.updater.start_polling(
+        allowed_updates=["message"],
+        drop_pending_updates=True,
+        poll_interval=1.0
+    )
+    
+    logger.info("🟢 Бот запущен!")
+    
+    # Основной цикл проверки
+    while True:
+        try:
+            await bot.check_channels()
+        except Exception as e:
+            logger.error(f"❌ Ошибка в цикле проверки: {e}")
+        
+        await asyncio.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     try:
