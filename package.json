@@ -1,0 +1,12 @@
+{
+  "name": "telegram-rss-aggregator",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegram-rss": "^1.0.0",
+    "xml2js": "^0.6.0"
+  }
+}
