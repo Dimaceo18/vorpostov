@@ -29,7 +29,6 @@ def install_dependencies():
         "requests==2.31.0",
         "numpy==1.26.0",
         "ffmpeg-python==0.2.0",
-        "beautifulsoup4==4.12.2",
         "feedparser==6.0.10"
     ]
     for dep in deps:
@@ -74,7 +73,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 RSS_FEED_URL = os.getenv("RSS_FEED_URL", "")
 TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID", "")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
-MAX_POST_AGE_MINUTES = int(os.getenv("MAX_POST_AGE_MINUTES", "60"))  # Увеличил до 60 минут
+MAX_POST_AGE_MINUTES = int(os.getenv("MAX_POST_AGE_MINUTES", "60"))
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не настроен!")
@@ -88,12 +87,13 @@ try:
 except ValueError:
     raise ValueError("❌ TARGET_CHANNEL_ID должно быть числом!")
 
-# Стиль ЧП ВМ
+# Стиль ЧП ВМ (из вашего старого бота)
 TARGET_W, TARGET_H = 720, 900
 CHP_GRADIENT_PCT = 0.48
 MN_TITLE_ZONE_PCT = 0.23
 BRIGHTNESS_FACTOR = 0.85
 FONT_CHP = "Montserrat-Black.ttf"
+FONT_FALLBACK = "Arial.ttf"
 
 # ==================== ЛОГИРОВАНИЕ ====================
 
@@ -103,11 +103,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Статистика (из старого бота)
 stats = {
     "started_at": datetime.now(),
     "processed": 0,
     "errors": 0,
-    "last_post": None
+    "last_post": None,
+    "last_error": None
 }
 
 LAST_POSTS_FILE = "last_posts.json"
@@ -128,7 +130,7 @@ def save_last_posts(data):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-# ==================== ШРИФТЫ ====================
+# ==================== ШРИФТЫ (из старого бота) ====================
 
 def download_fonts():
     fonts_urls = {
@@ -144,6 +146,8 @@ def download_fonts():
                     with open(font_name, "wb") as f:
                         f.write(response.content)
                     logger.info(f"✅ Шрифт {font_name} скачан")
+                else:
+                    logger.warning(f"⚠️ Не удалось скачать {font_name}")
             except Exception as e:
                 logger.error(f"❌ Ошибка скачивания {font_name}: {e}")
 
@@ -163,7 +167,8 @@ def load_font(font_name: str, size: int):
     system_fonts = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf"
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
     ]
     
     for font_path in system_fonts:
@@ -174,9 +179,9 @@ def load_font(font_name: str, size: int):
     
     return ImageFont.load_default()
 
-# ==================== ОБРАБОТКА ИЗОБРАЖЕНИЙ ====================
+# ==================== ОБРАБОТКА ИЗОБРАЖЕНИЙ (из старого бота) ====================
 
-def crop_to_ratio(img, target_w, target_h):
+def crop_to_ratio(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     w, h = img.size
     target_ratio = target_w / target_h
     cur_ratio = w / h
@@ -190,7 +195,7 @@ def crop_to_ratio(img, target_w, target_h):
         top = (h - new_h) // 2
         return img.crop((0, top, w, top + new_h))
 
-def apply_bottom_gradient(img, height_pct, max_alpha=220):
+def apply_bottom_gradient(img: Image.Image, height_pct: float, max_alpha: int = 220) -> Image.Image:
     w, h = img.size
     gh = int(h * height_pct)
     if gh <= 0:
@@ -210,14 +215,14 @@ def apply_bottom_gradient(img, height_pct, max_alpha=220):
     out = Image.alpha_composite(base, overlay)
     return out.convert("RGB")
 
-def text_width(draw, s, font):
+def text_width(draw, s: str, font) -> int:
     try:
         bbox = draw.textbbox((0, 0), s, font=font)
         return bbox[2] - bbox[0]
     except:
         return len(s) * font.size // 2
 
-def wrap_text(draw, text, font, max_width, max_lines=6):
+def wrap_text(draw, text: str, font, max_width: int, max_lines: int = 6):
     words = text.split()
     if not words:
         return [""], True
@@ -236,7 +241,8 @@ def wrap_text(draw, text, font, max_width, max_lines=6):
     lines.append(current)
     return lines, True
 
-def fit_text_block(draw, text, safe_w, max_block_h, max_lines=6, start_size=90, min_size=16):
+def fit_text_block(draw, text: str, safe_w: int, max_block_h: int,
+                   max_lines: int = 6, start_size: int = 90, min_size: int = 16):
     text = (text or "").strip()
     if not text:
         text = " "
@@ -340,7 +346,7 @@ def extract_title_from_text(text: str) -> str:
     
     return title
 
-def process_image(img, title_text):
+def process_image(img: Image.Image, title_text: str) -> Image.Image:
     try:
         img = crop_to_ratio(img, TARGET_W, TARGET_H)
         img = img.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
@@ -375,7 +381,7 @@ def process_image(img, title_text):
         logger.error(f"❌ Ошибка обработки изображения: {e}")
         return img
 
-def process_photo_bytes(photo_bytes, title_text):
+def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
     try:
         img = Image.open(BytesIO(photo_bytes)).convert("RGB")
         img = process_image(img, title_text)
@@ -387,9 +393,9 @@ def process_photo_bytes(photo_bytes, title_text):
         logger.error(f"❌ Ошибка обработки фото: {e}")
         return BytesIO(photo_bytes)
 
-# ==================== ОБРАБОТКА ВИДЕО ====================
+# ==================== ОБРАБОТКА ВИДЕО (из старого бота) ====================
 
-def process_video_frame(frame, title_text):
+def process_video_frame(frame: np.ndarray, title_text: str) -> np.ndarray:
     try:
         img = Image.fromarray(frame).convert("RGB")
         img = process_image(img, title_text)
@@ -398,7 +404,7 @@ def process_video_frame(frame, title_text):
         logger.error(f"❌ Ошибка обработки кадра: {e}")
         return frame
 
-def process_video_bytes(video_bytes, title_text):
+def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
     temp_input = None
     temp_output = None
     
@@ -452,6 +458,7 @@ def process_video_bytes(video_bytes, title_text):
         
     except Exception as e:
         logger.error(f"❌ Ошибка при обработке видео: {e}")
+        traceback.print_exc()
         output = BytesIO(video_bytes)
         output.seek(0)
         return output
@@ -498,7 +505,6 @@ def extract_image_url_from_entry(entry):
         if img_match:
             return img_match.group(1)
         
-        # Ищем ссылку на изображение
         img_match = re.search(r'(https?://[^\s]+\.(?:jpg|jpeg|png|gif|webp))', entry.description)
         if img_match:
             return img_match.group(1)
@@ -525,15 +531,11 @@ def get_rss_items():
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 pub_date = datetime(*entry.published_parsed[:6])
             
-            # Ищем изображение
             image_url = extract_image_url_from_entry(entry)
             
-            # Получаем полный текст
             full_text = entry.get('description', '') or entry.get('title', '')
             
-            # Если в description есть HTML, пытаемся извлечь чистый текст
             if full_text:
-                # Убираем HTML теги
                 full_text = re.sub(r'<[^>]+>', ' ', full_text)
                 full_text = re.sub(r'\s+', ' ', full_text).strip()
             
@@ -549,7 +551,6 @@ def get_rss_items():
         
         logger.info(f"📊 Получено {len(items)} постов")
         
-        # Логируем первые 3 поста
         for i, item in enumerate(items[:3]):
             has_image = '📸' if item.get('image_url') else '📝'
             logger.info(f"  [{i+1}] {has_image} {item['title'][:50]}...")
@@ -573,15 +574,21 @@ def download_image(url: str) -> Optional[bytes]:
         logger.error(f"❌ Ошибка скачивания: {e}")
     return None
 
-# ==================== КОМАНДЫ ====================
+# ==================== КОМАНДЫ (из старого бота) ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uptime = datetime.now() - stats['started_at']
+    hours = uptime.seconds // 3600
+    minutes = (uptime.seconds % 3600) // 60
+    
     await update.message.reply_text(
-        f"🤖 <b>Бот для репоста с оформлением ЧП ВМ (RSS)</b>\n\n"
+        f"🤖 <b>Бот для репоста с оформлением ЧП ВМ</b>\n\n"
         f"📡 RSS: <code>{RSS_FEED_URL}</code>\n"
         f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
         f"📊 Обработано: {stats['processed']}\n"
-        f"⏱ Макс. возраст: {MAX_POST_AGE_MINUTES} мин\n\n"
+        f"❌ Ошибок: {stats['errors']}\n"
+        f"⏱ Работает: {hours}ч {minutes}м\n"
+        f"📌 Последний пост: {stats['last_post'] or 'нет'}\n\n"
         f"📌 <b>Как использовать:</b>\n"
         f"• Бот автоматически проверяет RSS-ленту\n"
         f"• На фото наносится заголовок (первая строка)\n"
@@ -594,14 +601,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uptime = datetime.now() - stats['started_at']
+    hours = uptime.seconds // 3600
+    minutes = (uptime.seconds % 3600) // 60
+    
     total = sum(len(v) for v in bot.last_posts.values())
+    
     await update.message.reply_text(
-        f"📊 <b>Статистика</b>\n\n"
-        f"📨 Обработано: {stats['processed']}\n"
-        f"❌ Ошибок: {stats['errors']}\n"
-        f"📊 В истории: {total} постов\n"
-        f"📡 RSS: <code>{RSS_FEED_URL}</code>\n"
-        f"✅ Бот работает!",
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"⏱ <b>Время работы:</b> {hours}ч {minutes}м\n"
+        f"📨 <b>Обработано постов:</b> {stats['processed']}\n"
+        f"❌ <b>Ошибок:</b> {stats['errors']}\n"
+        f"📅 <b>Запущен:</b> {stats['started_at'].strftime('%d.%m.%Y %H:%M:%S')}\n"
+        f"📌 <b>Последний пост:</b> {stats['last_post'] or 'нет'}\n"
+        f"📡 <b>RSS:</b> <code>{RSS_FEED_URL}</code>\n"
+        f"📢 <b>Целевой канал:</b> <code>{TARGET_CHANNEL_ID}</code>\n"
+        f"📊 <b>В истории:</b> {total} постов\n"
+        f"🐍 <b>Python:</b> {sys.version.split()[0]}\n\n"
+        f"✅ <b>Бот работает</b> 🟢",
         parse_mode="HTML"
     )
 
@@ -701,12 +718,11 @@ class RSSBot:
             photo_title = extract_title_from_text(full_text)
             
             logger.info(f"🔄 ОБРАБОТКА:")
-            logger.info(f"   📝 Текст (оригинал): {full_text[:100]}..." if len(full_text) > 100 else f"   📝 Текст (оригинал): {full_text}")
+            logger.info(f"   📝 Текст (оригинал): {full_text[:150]}..." if len(full_text) > 150 else f"   📝 Текст (оригинал): {full_text}")
             logger.info(f"   🏷️ Заголовок для фото: {photo_title}")
             
             # Проверяем наличие изображения
             image_url = item.get('image_url')
-            logger.info(f"   📸 Изображение: {'ЕСТЬ' if image_url else 'НЕТ'}")
             
             if image_url:
                 logger.info("📸 Есть фото, обрабатываем...")
@@ -751,7 +767,7 @@ bot = None
 async def main():
     global bot
     
-    logger.info("🚀 Бот для репоста с оформлением ЧП ВМ (RSS) запускается...")
+    logger.info("🚀 Бот для репоста с оформлением ЧП ВМ запускается...")
     logger.info(f"📡 RSS: {RSS_FEED_URL}")
     
     download_fonts()
@@ -771,6 +787,7 @@ async def main():
         logger.info(f"✅ Целевой канал: {target.title} (ID: {TARGET_CHANNEL_ID})")
     except Exception as e:
         logger.error(f"❌ Ошибка доступа к целевому каналу: {e}")
+        logger.info("💡 Убедитесь, что бот добавлен в канал как администратор")
         return
     
     app.add_handler(CommandHandler("start", start))
@@ -790,7 +807,11 @@ async def main():
     await app.updater.start_polling(
         allowed_updates=["message"],
         drop_pending_updates=True,
-        poll_interval=1.0
+        poll_interval=1.0,
+        timeout=30,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30
     )
     
     logger.info("🟢 Бот запущен!")
