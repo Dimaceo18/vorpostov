@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 import requests
-from bs4 import BeautifulSoup
 import feedparser
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telegram import Bot, Update, InputMediaPhoto, InputMediaVideo
@@ -23,7 +22,6 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes, Com
 # ==================== АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ ====================
 
 def install_dependencies():
-    """Автоматическая установка всех зависимостей"""
     deps = [
         "python-telegram-bot==20.7",
         "Pillow==10.1.0",
@@ -32,7 +30,6 @@ def install_dependencies():
         "numpy==1.26.0",
         "ffmpeg-python==0.2.0",
         "beautifulsoup4==4.12.2",
-        "lxml==4.9.3",
         "feedparser==6.0.10"
     ]
     for dep in deps:
@@ -45,7 +42,7 @@ def install_dependencies():
 
 install_dependencies()
 
-# Добавляем пользовательские пути в sys.path
+# Добавляем пользовательские пути
 import site
 site.addsitedir(os.path.expanduser("~/.local/lib/python3.10/site-packages"))
 
@@ -56,14 +53,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telegram import Bot, Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
-# Пробуем импортировать moviepy разными способами
 try:
     from moviepy import VideoFileClip
 except ImportError:
     try:
         from moviepy.video.io.VideoFileClip import VideoFileClip
     except ImportError:
-        # Пробуем через sys.path
         import sys
         sys.path.append(os.path.expanduser("~/.local/lib/python3.10/site-packages"))
         try:
@@ -79,7 +74,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 RSS_FEED_URL = os.getenv("RSS_FEED_URL", "")
 TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID", "")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
-MAX_POST_AGE_MINUTES = int(os.getenv("MAX_POST_AGE_MINUTES", "5"))
+MAX_POST_AGE_MINUTES = int(os.getenv("MAX_POST_AGE_MINUTES", "60"))  # Увеличил до 60 минут
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не настроен!")
@@ -99,7 +94,6 @@ CHP_GRADIENT_PCT = 0.48
 MN_TITLE_ZONE_PCT = 0.23
 BRIGHTNESS_FACTOR = 0.85
 FONT_CHP = "Montserrat-Black.ttf"
-FONT_FALLBACK = "Arial.ttf"
 
 # ==================== ЛОГИРОВАНИЕ ====================
 
@@ -109,18 +103,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Статистика
 stats = {
     "started_at": datetime.now(),
     "processed": 0,
     "errors": 0,
-    "last_post": None,
-    "last_error": None
+    "last_post": None
 }
 
 LAST_POSTS_FILE = "last_posts.json"
-
-# ==================== РАБОТА С ПОСЛЕДНИМИ ПОСТАМИ ====================
 
 def load_last_posts():
     try:
@@ -154,8 +144,6 @@ def download_fonts():
                     with open(font_name, "wb") as f:
                         f.write(response.content)
                     logger.info(f"✅ Шрифт {font_name} скачан")
-                else:
-                    logger.warning(f"⚠️ Не удалось скачать {font_name}")
             except Exception as e:
                 logger.error(f"❌ Ошибка скачивания {font_name}: {e}")
 
@@ -175,8 +163,7 @@ def load_font(font_name: str, size: int):
     system_fonts = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf"
     ]
     
     for font_path in system_fonts:
@@ -189,7 +176,7 @@ def load_font(font_name: str, size: int):
 
 # ==================== ОБРАБОТКА ИЗОБРАЖЕНИЙ ====================
 
-def crop_to_ratio(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+def crop_to_ratio(img, target_w, target_h):
     w, h = img.size
     target_ratio = target_w / target_h
     cur_ratio = w / h
@@ -203,7 +190,7 @@ def crop_to_ratio(img: Image.Image, target_w: int, target_h: int) -> Image.Image
         top = (h - new_h) // 2
         return img.crop((0, top, w, top + new_h))
 
-def apply_bottom_gradient(img: Image.Image, height_pct: float, max_alpha: int = 220) -> Image.Image:
+def apply_bottom_gradient(img, height_pct, max_alpha=220):
     w, h = img.size
     gh = int(h * height_pct)
     if gh <= 0:
@@ -223,14 +210,14 @@ def apply_bottom_gradient(img: Image.Image, height_pct: float, max_alpha: int = 
     out = Image.alpha_composite(base, overlay)
     return out.convert("RGB")
 
-def text_width(draw, s: str, font) -> int:
+def text_width(draw, s, font):
     try:
         bbox = draw.textbbox((0, 0), s, font=font)
         return bbox[2] - bbox[0]
     except:
         return len(s) * font.size // 2
 
-def wrap_text(draw, text: str, font, max_width: int, max_lines: int = 6):
+def wrap_text(draw, text, font, max_width, max_lines=6):
     words = text.split()
     if not words:
         return [""], True
@@ -249,8 +236,7 @@ def wrap_text(draw, text: str, font, max_width: int, max_lines: int = 6):
     lines.append(current)
     return lines, True
 
-def fit_text_block(draw, text: str, safe_w: int, max_block_h: int,
-                   max_lines: int = 6, start_size: int = 90, min_size: int = 16):
+def fit_text_block(draw, text, safe_w, max_block_h, max_lines=6, start_size=90, min_size=16):
     text = (text or "").strip()
     if not text:
         text = " "
@@ -345,7 +331,7 @@ def extract_title_from_text(text: str) -> str:
     if '\n' in text:
         title = text.split('\n')[0].strip()
     else:
-        title = text.strip()
+        title = text[:200].strip()
     
     title = emoji_pattern.sub('', title)
     
@@ -354,7 +340,7 @@ def extract_title_from_text(text: str) -> str:
     
     return title
 
-def process_image(img: Image.Image, title_text: str) -> Image.Image:
+def process_image(img, title_text):
     try:
         img = crop_to_ratio(img, TARGET_W, TARGET_H)
         img = img.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
@@ -389,7 +375,7 @@ def process_image(img: Image.Image, title_text: str) -> Image.Image:
         logger.error(f"❌ Ошибка обработки изображения: {e}")
         return img
 
-def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
+def process_photo_bytes(photo_bytes, title_text):
     try:
         img = Image.open(BytesIO(photo_bytes)).convert("RGB")
         img = process_image(img, title_text)
@@ -403,7 +389,7 @@ def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
 
 # ==================== ОБРАБОТКА ВИДЕО ====================
 
-def process_video_frame(frame: np.ndarray, title_text: str) -> np.ndarray:
+def process_video_frame(frame, title_text):
     try:
         img = Image.fromarray(frame).convert("RGB")
         img = process_image(img, title_text)
@@ -412,7 +398,7 @@ def process_video_frame(frame: np.ndarray, title_text: str) -> np.ndarray:
         logger.error(f"❌ Ошибка обработки кадра: {e}")
         return frame
 
-def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
+def process_video_bytes(video_bytes, title_text):
     temp_input = None
     temp_output = None
     
@@ -466,7 +452,6 @@ def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
         
     except Exception as e:
         logger.error(f"❌ Ошибка при обработке видео: {e}")
-        traceback.print_exc()
         output = BytesIO(video_bytes)
         output.seek(0)
         return output
@@ -481,6 +466,44 @@ def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
             pass
 
 # ==================== RSS-ПАРСИНГ ====================
+
+def extract_image_url_from_entry(entry):
+    """Извлечение URL изображения из RSS-записи"""
+    
+    # 1. Проверяем media_content
+    if hasattr(entry, 'media_content') and entry.media_content:
+        for media in entry.media_content:
+            if media.get('type', '').startswith('image'):
+                return media.get('url')
+    
+    # 2. Проверяем media_thumbnail
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get('url')
+    
+    # 3. Проверяем enclosure
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get('type', '').startswith('image'):
+                return enc.get('href')
+    
+    # 4. Проверяем links
+    if hasattr(entry, 'links'):
+        for link in entry.links:
+            if link.get('type', '').startswith('image'):
+                return link.get('href')
+    
+    # 5. Ищем в description
+    if hasattr(entry, 'description') and entry.description:
+        img_match = re.search(r'<img[^>]+src="([^"]+)"', entry.description)
+        if img_match:
+            return img_match.group(1)
+        
+        # Ищем ссылку на изображение
+        img_match = re.search(r'(https?://[^\s]+\.(?:jpg|jpeg|png|gif|webp))', entry.description)
+        if img_match:
+            return img_match.group(1)
+    
+    return None
 
 def get_rss_items():
     try:
@@ -502,29 +525,35 @@ def get_rss_items():
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 pub_date = datetime(*entry.published_parsed[:6])
             
-            image_url = None
-            if hasattr(entry, 'media_content'):
-                for media in entry.media_content:
-                    if media.get('type', '').startswith('image'):
-                        image_url = media.get('url')
-                        break
+            # Ищем изображение
+            image_url = extract_image_url_from_entry(entry)
             
-            if not image_url and hasattr(entry, 'description'):
-                img_match = re.search(r'<img[^>]+src="([^"]+)"', entry.description)
-                if img_match:
-                    image_url = img_match.group(1)
+            # Получаем полный текст
+            full_text = entry.get('description', '') or entry.get('title', '')
+            
+            # Если в description есть HTML, пытаемся извлечь чистый текст
+            if full_text:
+                # Убираем HTML теги
+                full_text = re.sub(r'<[^>]+>', ' ', full_text)
+                full_text = re.sub(r'\s+', ' ', full_text).strip()
             
             items.append({
                 'id': hashlib.md5(entry.link.encode()).hexdigest(),
-                'title': entry.title if hasattr(entry, 'title') else '',
-                'description': entry.description if hasattr(entry, 'description') else '',
-                'link': entry.link if hasattr(entry, 'link') else '',
+                'title': entry.get('title', ''),
+                'description': full_text,
+                'link': entry.get('link', ''),
                 'pubDate': pub_date,
                 'image_url': image_url,
                 'channel': 'rss'
             })
         
         logger.info(f"📊 Получено {len(items)} постов")
+        
+        # Логируем первые 3 поста
+        for i, item in enumerate(items[:3]):
+            has_image = '📸' if item.get('image_url') else '📝'
+            logger.info(f"  [{i+1}] {has_image} {item['title'][:50]}...")
+        
         return items
         
     except Exception as e:
@@ -547,88 +576,56 @@ def download_image(url: str) -> Optional[bytes]:
 # ==================== КОМАНДЫ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uptime = datetime.now() - stats['started_at']
-    hours = uptime.seconds // 3600
-    minutes = (uptime.seconds % 3600) // 60
-    
     await update.message.reply_text(
         f"🤖 <b>Бот для репоста с оформлением ЧП ВМ (RSS)</b>\n\n"
         f"📡 RSS: <code>{RSS_FEED_URL}</code>\n"
         f"📢 Целевой канал: <code>{TARGET_CHANNEL_ID}</code>\n"
         f"📊 Обработано: {stats['processed']}\n"
-        f"❌ Ошибок: {stats['errors']}\n"
-        f"⏱ Работает: {hours}ч {minutes}м\n"
-        f"⏳ Макс. возраст: {MAX_POST_AGE_MINUTES} мин\n\n"
+        f"⏱ Макс. возраст: {MAX_POST_AGE_MINUTES} мин\n\n"
         f"📌 <b>Как использовать:</b>\n"
         f"• Бот автоматически проверяет RSS-ленту\n"
         f"• На фото наносится заголовок (первая строка)\n"
         f"• Текст поста НЕ изменяется\n"
         f"• Команда /stats - статистика\n"
-        f"• Команда /test - проверка подключения\n"
+        f"• Команда /test - проверка\n"
         f"• Команда /reset - сброс истории\n\n"
         f"✅ <b>Бот работает!</b>",
         parse_mode="HTML"
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uptime = datetime.now() - stats['started_at']
-    hours = uptime.seconds // 3600
-    minutes = (uptime.seconds % 3600) // 60
-    
     total = sum(len(v) for v in bot.last_posts.values())
-    
     await update.message.reply_text(
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"⏱ <b>Время работы:</b> {hours}ч {minutes}м\n"
-        f"📨 <b>Обработано постов:</b> {stats['processed']}\n"
-        f"❌ <b>Ошибок:</b> {stats['errors']}\n"
-        f"📅 <b>Запущен:</b> {stats['started_at'].strftime('%d.%m.%Y %H:%M:%S')}\n"
-        f"📌 <b>Последний пост:</b> {stats['last_post'] or 'нет'}\n"
-        f"📡 <b>RSS:</b> <code>{RSS_FEED_URL}</code>\n"
-        f"📢 <b>Целевой канал:</b> <code>{TARGET_CHANNEL_ID}</code>\n"
-        f"📊 <b>В истории:</b> {total} постов\n"
-        f"🐍 <b>Python:</b> {sys.version.split()[0]}\n\n"
-        f"✅ <b>Бот работает</b> 🟢",
+        f"📊 <b>Статистика</b>\n\n"
+        f"📨 Обработано: {stats['processed']}\n"
+        f"❌ Ошибок: {stats['errors']}\n"
+        f"📊 В истории: {total} постов\n"
+        f"📡 RSS: <code>{RSS_FEED_URL}</code>\n"
+        f"✅ Бот работает!",
         parse_mode="HTML"
     )
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        bot_obj = context.bot
-        
-        try:
-            target = await bot_obj.get_chat(TARGET_CHANNEL_ID)
-            target_status = f"✅ {target.title} (ID: {TARGET_CHANNEL_ID})"
-        except Exception as e:
-            target_status = f"❌ Ошибка: {e}"
-        
-        me = await bot_obj.get_me()
-        
-        try:
-            feed = feedparser.parse(RSS_FEED_URL)
-            rss_status = f"✅ Работает, записей: {len(feed.entries)}"
-            if feed.bozo:
-                rss_status = f"⚠️ Ошибка парсинга: {feed.bozo_exception}"
-        except Exception as e:
-            rss_status = f"❌ Ошибка: {e}"
-        
-        await update.message.reply_text(
-            f"🔍 <b>Проверка подключения</b>\n\n"
-            f"🤖 <b>Бот:</b> @{me.username}\n"
-            f"📡 <b>RSS:</b> {rss_status}\n"
-            f"📢 <b>Целевой канал:</b> {target_status}\n"
-            f"📊 <b>Обработано:</b> {stats['processed']}\n"
-            f"❌ <b>Ошибок:</b> {stats['errors']}\n\n"
-            f"🔄 <b>Статус:</b> {'✅ Все работает' if stats['processed'] > 0 else '⏳ Ожидание постов'}",
-            parse_mode="HTML"
-        )
+        feed = feedparser.parse(RSS_FEED_URL)
+        rss_status = f"✅ Работает, записей: {len(feed.entries)}"
+        if feed.bozo:
+            rss_status = f"⚠️ Ошибка: {feed.bozo_exception}"
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка проверки: {e}")
+        rss_status = f"❌ Ошибка: {e}"
+    
+    await update.message.reply_text(
+        f"🔍 <b>Проверка</b>\n\n"
+        f"📡 RSS: {rss_status}\n"
+        f"📊 Обработано: {stats['processed']}\n"
+        f"✅ Статус: {'✅ ОК' if stats['processed'] > 0 else '⏳ Ожидание'}",
+        parse_mode="HTML"
+    )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot.last_posts = {}
     save_last_posts({})
-    await update.message.reply_text("✅ История обработанных постов сброшена!")
+    await update.message.reply_text("✅ История сброшена!")
 
 # ==================== ОСНОВНОЙ БОТ ====================
 
@@ -667,12 +664,13 @@ class RSSBot:
                         continue
                 
                 if post_id in self.last_posts.get(channel, []):
+                    logger.info(f"⏭️ Пост уже обработан")
                     continue
                 
                 logger.info(f"✨ НОВЫЙ ПОСТ!")
                 new_posts += 1
                 
-                await self.process_post(item, post_id)
+                await self.process_post(item)
                 
                 if channel not in self.last_posts:
                     self.last_posts[channel] = []
@@ -694,23 +692,30 @@ class RSSBot:
             logger.info(f"✅ ОБРАБОТАНО {new_posts} ПОСТОВ")
         logger.info("="*60)
     
-    async def process_post(self, item, post_id):
+    async def process_post(self, item):
         try:
+            # ОРИГИНАЛЬНЫЙ ТЕКСТ (НЕ ИЗМЕНЯЕМ)
             full_text = item.get('description') or item.get('title') or ""
+            
+            # Заголовок для фото (только первая строка, без эмодзи)
             photo_title = extract_title_from_text(full_text)
             
             logger.info(f"🔄 ОБРАБОТКА:")
-            logger.info(f"   📝 Текст (оригинал): {full_text[:150]}..." if len(full_text) > 150 else f"   📝 Текст (оригинал): {full_text}")
+            logger.info(f"   📝 Текст (оригинал): {full_text[:100]}..." if len(full_text) > 100 else f"   📝 Текст (оригинал): {full_text}")
             logger.info(f"   🏷️ Заголовок для фото: {photo_title}")
             
+            # Проверяем наличие изображения
             image_url = item.get('image_url')
+            logger.info(f"   📸 Изображение: {'ЕСТЬ' if image_url else 'НЕТ'}")
             
             if image_url:
                 logger.info("📸 Есть фото, обрабатываем...")
                 img_data = download_image(image_url)
                 if img_data:
+                    # Обрабатываем фото в стиле ЧП ВМ
                     processed = process_photo_bytes(img_data, photo_title)
                     
+                    # Отправляем фото с ОРИГИНАЛЬНЫМ текстом
                     await self.bot.send_photo(
                         chat_id=self.target_chat,
                         photo=BytesIO(processed.getvalue()),
@@ -719,11 +724,12 @@ class RSSBot:
                     )
                     stats['processed'] += 1
                     stats['last_post'] = f"Фото в {datetime.now().strftime('%H:%M:%S')}"
-                    logger.info("✅ ФОТО ОТПРАВЛЕНО!")
+                    logger.info("✅ ФОТО С ТЕКСТОМ ОТПРАВЛЕНО!")
                     return
             
+            # Только текст
             if full_text:
-                logger.info("📝 Только текст")
+                logger.info("📝 Только текст (без фото)")
                 await self.bot.send_message(
                     chat_id=self.target_chat,
                     text=full_text,
@@ -765,7 +771,6 @@ async def main():
         logger.info(f"✅ Целевой канал: {target.title} (ID: {TARGET_CHANNEL_ID})")
     except Exception as e:
         logger.error(f"❌ Ошибка доступа к целевому каналу: {e}")
-        logger.info("💡 Убедитесь, что бот добавлен в канал как администратор")
         return
     
     app.add_handler(CommandHandler("start", start))
@@ -785,11 +790,7 @@ async def main():
     await app.updater.start_polling(
         allowed_updates=["message"],
         drop_pending_updates=True,
-        poll_interval=1.0,
-        timeout=30,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30
+        poll_interval=1.0
     )
     
     logger.info("🟢 Бот запущен!")
