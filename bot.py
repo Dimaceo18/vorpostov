@@ -41,31 +41,42 @@ def install_dependencies():
             __import__(package_name)
         except ImportError:
             print(f"📦 Устанавливаем {dep}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", dep, "--user"])
 
 install_dependencies()
 
+# Добавляем пользовательские пути в sys.path
+import site
+site.addsitedir(os.path.expanduser("~/.local/lib/python3.10/site-packages"))
+
 # ==================== ИМПОРТЫ ====================
 
-import requests
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from telegram import Bot, Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
+# Пробуем импортировать moviepy разными способами
 try:
     from moviepy import VideoFileClip
 except ImportError:
     try:
         from moviepy.video.io.VideoFileClip import VideoFileClip
-    except:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "moviepy==1.0.3"])
-        from moviepy.video.io.VideoFileClip import VideoFileClip
+    except ImportError:
+        # Пробуем через sys.path
+        import sys
+        sys.path.append(os.path.expanduser("~/.local/lib/python3.10/site-packages"))
+        try:
+            from moviepy.video.io.VideoFileClip import VideoFileClip
+        except ImportError:
+            print("📦 Устанавливаем moviepy...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "moviepy==1.0.3", "--user"])
+            from moviepy.video.io.VideoFileClip import VideoFileClip
 
 # ==================== НАСТРОЙКИ ====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-RSS_FEED_URL = os.getenv("RSS_FEED_URL", "")  # RSS-лента
+RSS_FEED_URL = os.getenv("RSS_FEED_URL", "")
 TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID", "")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
 MAX_POST_AGE_MINUTES = int(os.getenv("MAX_POST_AGE_MINUTES", "5"))
@@ -82,7 +93,7 @@ try:
 except ValueError:
     raise ValueError("❌ TARGET_CHANNEL_ID должно быть числом!")
 
-# Стиль ЧП ВМ (из старого бота)
+# Стиль ЧП ВМ
 TARGET_W, TARGET_H = 720, 900
 CHP_GRADIENT_PCT = 0.48
 MN_TITLE_ZONE_PCT = 0.23
@@ -127,10 +138,9 @@ def save_last_posts(data):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
 
-# ==================== ШРИФТЫ (из старого бота) ====================
+# ==================== ШРИФТЫ ====================
 
 def download_fonts():
-    """Скачивание шрифтов"""
     fonts_urls = {
         "Montserrat-Black.ttf": "https://raw.githubusercontent.com/Dimaceo18/reporterbot/main/Montserrat-Black.ttf",
         "Arial.ttf": "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf",
@@ -150,22 +160,18 @@ def download_fonts():
                 logger.error(f"❌ Ошибка скачивания {font_name}: {e}")
 
 def load_font(font_name: str, size: int):
-    """Загрузка шрифта с fallback"""
-    # Пробуем Montserrat
     try:
         if os.path.exists("Montserrat-Black.ttf"):
             return ImageFont.truetype("Montserrat-Black.ttf", size=size)
     except:
         pass
     
-    # Пробуем Arial
     try:
         if os.path.exists("Arial.ttf"):
             return ImageFont.truetype("Arial.ttf", size=size)
     except:
         pass
     
-    # Пробуем системные шрифты
     system_fonts = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -181,7 +187,7 @@ def load_font(font_name: str, size: int):
     
     return ImageFont.load_default()
 
-# ==================== ОБРАБОТКА ИЗОБРАЖЕНИЙ (из старого бота) ====================
+# ==================== ОБРАБОТКА ИЗОБРАЖЕНИЙ ====================
 
 def crop_to_ratio(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     w, h = img.size
@@ -315,11 +321,9 @@ def clean_title_for_card(title: str) -> str:
     return clean.strip()
 
 def extract_title_from_text(text: str) -> str:
-    """Извлечение заголовка для фото (только первая строка)"""
     if not text:
         return ""
     
-    # Удаляем эмодзи для заголовка
     emoji_pattern = re.compile(
         "["
         "\U0001F600-\U0001F64F"
@@ -338,13 +342,11 @@ def extract_title_from_text(text: str) -> str:
         flags=re.UNICODE
     )
     
-    # Берем первую строку как заголовок
     if '\n' in text:
         title = text.split('\n')[0].strip()
     else:
         title = text.strip()
     
-    # Очищаем от эмодзи
     title = emoji_pattern.sub('', title)
     
     if len(title) > 200:
@@ -399,7 +401,7 @@ def process_photo_bytes(photo_bytes: bytes, title_text: str) -> BytesIO:
         logger.error(f"❌ Ошибка обработки фото: {e}")
         return BytesIO(photo_bytes)
 
-# ==================== ОБРАБОТКА ВИДЕО (из старого бота) ====================
+# ==================== ОБРАБОТКА ВИДЕО ====================
 
 def process_video_frame(frame: np.ndarray, title_text: str) -> np.ndarray:
     try:
@@ -481,7 +483,6 @@ def process_video_bytes(video_bytes: bytes, title_text: str) -> BytesIO:
 # ==================== RSS-ПАРСИНГ ====================
 
 def get_rss_items():
-    """Получение постов из RSS-ленты"""
     try:
         logger.info(f"📡 Запрос к RSS: {RSS_FEED_URL}")
         
@@ -501,7 +502,6 @@ def get_rss_items():
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 pub_date = datetime(*entry.published_parsed[:6])
             
-            # Ищем изображение
             image_url = None
             if hasattr(entry, 'media_content'):
                 for media in entry.media_content:
@@ -544,7 +544,7 @@ def download_image(url: str) -> Optional[bytes]:
         logger.error(f"❌ Ошибка скачивания: {e}")
     return None
 
-# ==================== КОМАНДЫ (из старого бота) ====================
+# ==================== КОМАНДЫ ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - stats['started_at']
@@ -593,19 +593,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для проверки подключения"""
     try:
-        bot = context.bot
+        bot_obj = context.bot
         
         try:
-            target = await bot.get_chat(TARGET_CHANNEL_ID)
+            target = await bot_obj.get_chat(TARGET_CHANNEL_ID)
             target_status = f"✅ {target.title} (ID: {TARGET_CHANNEL_ID})"
         except Exception as e:
             target_status = f"❌ Ошибка: {e}"
         
-        me = await bot.get_me()
+        me = await bot_obj.get_me()
         
-        # Проверяем RSS
         try:
             feed = feedparser.parse(RSS_FEED_URL)
             rss_status = f"✅ Работает, записей: {len(feed.entries)}"
@@ -628,7 +626,6 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка проверки: {e}")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сброс истории обработанных постов"""
     bot.last_posts = {}
     save_last_posts({})
     await update.message.reply_text("✅ История обработанных постов сброшена!")
@@ -660,7 +657,6 @@ class RSSBot:
                 post_id = item.get('id')
                 channel = 'rss'
                 
-                # Проверяем дату
                 pub_date = item.get('pubDate')
                 if pub_date:
                     now = datetime.now(pub_date.tzinfo) if pub_date.tzinfo else datetime.now()
@@ -670,7 +666,6 @@ class RSSBot:
                         logger.info(f"⏭️ Пост старый ({age_minutes:.1f} мин) - пропускаем")
                         continue
                 
-                # Проверяем, не обработан ли уже
                 if post_id in self.last_posts.get(channel, []):
                     continue
                 
@@ -700,29 +695,22 @@ class RSSBot:
         logger.info("="*60)
     
     async def process_post(self, item, post_id):
-        """Обработка поста с оформлением из старого бота"""
         try:
-            # Берем полный текст (НЕ ИЗМЕНЯЕМ)
             full_text = item.get('description') or item.get('title') or ""
-            
-            # Заголовок для фото (только первая строка, без эмодзи)
             photo_title = extract_title_from_text(full_text)
             
             logger.info(f"🔄 ОБРАБОТКА:")
             logger.info(f"   📝 Текст (оригинал): {full_text[:150]}..." if len(full_text) > 150 else f"   📝 Текст (оригинал): {full_text}")
             logger.info(f"   🏷️ Заголовок для фото: {photo_title}")
             
-            # Проверяем наличие изображения
             image_url = item.get('image_url')
             
             if image_url:
                 logger.info("📸 Есть фото, обрабатываем...")
                 img_data = download_image(image_url)
                 if img_data:
-                    # Обрабатываем фото в стиле ЧП ВМ
                     processed = process_photo_bytes(img_data, photo_title)
                     
-                    # Отправляем фото с ОРИГИНАЛЬНЫМ текстом
                     await self.bot.send_photo(
                         chat_id=self.target_chat,
                         photo=BytesIO(processed.getvalue()),
@@ -734,7 +722,6 @@ class RSSBot:
                     logger.info("✅ ФОТО ОТПРАВЛЕНО!")
                     return
             
-            # Только текст
             if full_text:
                 logger.info("📝 Только текст")
                 await self.bot.send_message(
@@ -773,7 +760,6 @@ async def main():
     except Exception as e:
         logger.warning(f"⚠️ Ошибка удаления webhook: {e}")
     
-    # Проверяем доступ к целевому каналу
     try:
         target = await app.bot.get_chat(TARGET_CHANNEL_ID)
         logger.info(f"✅ Целевой канал: {target.title} (ID: {TARGET_CHANNEL_ID})")
@@ -782,7 +768,6 @@ async def main():
         logger.info("💡 Убедитесь, что бот добавлен в канал как администратор")
         return
     
-    # Регистрируем команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("test", test_command))
@@ -810,7 +795,6 @@ async def main():
     logger.info("🟢 Бот запущен!")
     logger.info("💡 Команды: /start, /stats, /test, /reset")
     
-    # Основной цикл проверки RSS
     while True:
         try:
             await bot.check_channels()
@@ -824,6 +808,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен")
         sys.exit(0)
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        sys.exit(1)
