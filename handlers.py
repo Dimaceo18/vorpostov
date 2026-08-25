@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ContextTypes
 import logging
 from services import DeepSeekService
 import os
@@ -8,20 +8,25 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # Инициализируем сервис DeepSeek
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+
+if not DEEPSEEK_API_KEY:
+    logger.error("❌ DEEPSEEK_API_KEY не найден в переменных окружения")
+    raise ValueError("DEEPSEEK_API_KEY is required")
+
 deepseek = DeepSeekService(
-    api_key=os.getenv('DEEPSEEK_API_KEY'),
-    base_url=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+    api_key=DEEPSEEK_API_KEY,
+    base_url=DEEPSEEK_BASE_URL
 )
 
 # Константы для callback_data
 NEWS_CALLBACK = "news"
 EVENTS_CALLBACK = "events"
 WEATHER_CURRENCY_CALLBACK = "weather_currency"
-CUSTOM_QUERY_CALLBACK = "custom_query"
 
 # Хранилище состояний пользователей
 user_states = {}
-user_queries = {}  # Для временного хранения пользовательских запросов
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -29,7 +34,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     
     if user_id not in user_states:
-        user_states[user_id] = {'active': True, 'requests_count': 0, 'last_active': datetime.now()}
+        user_states[user_id] = {
+            'active': True, 
+            'requests_count': 0, 
+            'last_active': datetime.now(),
+            'created_at': datetime.now()
+        }
     
     welcome_text = (
         f"👋 Привет, {user.first_name}!\n\n"
@@ -181,7 +191,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Запустить бота и показать главное меню\n"
         "/help - Показать эту справку\n"
         "/stop - Отключить бота\n"
-        "/restart - Перезапустить бота\n\n"
+        "/restart - Перезапустить бота\n"
+        "/stats - Показать статистику использования\n\n"
         "📌 **Как пользоваться:**\n"
         "1. Используй кнопки для быстрого доступа к информации\n"
         "2. Или просто напиши свой вопрос текстом\n\n"
@@ -203,12 +214,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in user_states:
         stats = user_states[user_id]
+        days_active = (datetime.now() - stats.get('created_at', datetime.now())).days
         stats_text = (
             "📊 **Ваша статистика:**\n\n"
             f"• Запросов выполнено: {stats.get('requests_count', 0)}\n"
             f"• Последний запрос: {stats.get('last_active', datetime.now()).strftime('%H:%M %d.%m.%Y')}\n"
             f"• Статус: {'✅ Активен' if stats.get('active', True) else '❌ Отключен'}\n"
-            f"• Время работы: { (datetime.now() - stats.get('created_at', datetime.now())).days } дней"
+            f"• Время работы: {days_active} дней"
         )
         await update.message.reply_text(stats_text, parse_mode='Markdown')
     else:
