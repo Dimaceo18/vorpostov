@@ -4,6 +4,7 @@ import logging
 from services import DeepSeekService
 import os
 from datetime import datetime
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +14,6 @@ DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 
 if not DEEPSEEK_API_KEY:
     logger.error("❌ DEEPSEEK_API_KEY не найден в переменных окружения")
-    # Вместо ошибки, создаем заглушку
     deepseek = None
     logger.warning("⚠️ DeepSeek сервис не инициализирован")
 else:
@@ -35,6 +35,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
     user_id = user.id
+    logger.info(f"👤 Пользователь {user_id} ({user.first_name}) запустил бота")
     
     if user_id not in user_states:
         user_states[user_id] = {
@@ -69,45 +70,56 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    logger.info(f"✅ Отправлено меню пользователю {user_id}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    # Проверяем, активен ли пользователь
-    if user_id not in user_states or not user_states[user_id].get('active', True):
-        await query.edit_message_text("❌ Бот отключен. Для активации нажмите /start")
-        return
-    
-    # Проверяем, инициализирован ли DeepSeek
-    if deepseek is None:
-        await query.edit_message_text(
-            "❌ Сервис DeepSeek не инициализирован. "
-            "Пожалуйста, проверьте настройки DEEPSEEK_API_KEY на Render."
-        )
-        return
-    
-    # Обновляем статистику
-    user_states[user_id]['requests_count'] += 1
-    user_states[user_id]['last_active'] = datetime.now()
-    
-    # Отправляем сообщение о начале обработки
-    loading_message = await query.edit_message_text(
-        "🔍 Ищу актуальную информацию в интернете...\n"
-        "Это может занять 5-10 секунд."
-    )
-    
     try:
-        if query.data == NEWS_CALLBACK:
+        query = update.callback_query
+        user_id = query.from_user.id
+        callback_data = query.data
+        
+        logger.info(f"🔘 Пользователь {user_id} нажал кнопку: {callback_data}")
+        
+        # Отвечаем на callback
+        await query.answer()
+        
+        # Проверяем, активен ли пользователь
+        if user_id not in user_states or not user_states[user_id].get('active', True):
+            await query.edit_message_text("❌ Бот отключен. Для активации нажмите /start")
+            return
+        
+        # Проверяем, инициализирован ли DeepSeek
+        if deepseek is None:
+            await query.edit_message_text(
+                "❌ Сервис DeepSeek не инициализирован. "
+                "Пожалуйста, проверьте настройки DEEPSEEK_API_KEY на Render."
+            )
+            return
+        
+        # Обновляем статистику
+        user_states[user_id]['requests_count'] += 1
+        user_states[user_id]['last_active'] = datetime.now()
+        
+        # Отправляем сообщение о начале обработки
+        loading_message = await query.edit_message_text(
+            "🔍 Ищу актуальную информацию в интернете...\n"
+            "⏳ Это может занять 5-15 секунд.\n\n"
+            "🔄 Пожалуйста, подождите..."
+        )
+        logger.info(f"⏳ Начат поиск для пользователя {user_id} по запросу: {callback_data}")
+        
+        # Обрабатываем запрос
+        if callback_data == NEWS_CALLBACK:
+            logger.info(f"📰 Запрос новостей от {user_id}")
             result = await deepseek.generate_news_digest()
             prefix = "📰 **Дайджест новостей на сегодня**\n\n"
-        elif query.data == EVENTS_CALLBACK:
+        elif callback_data == EVENTS_CALLBACK:
+            logger.info(f"🎭 Запрос афиши от {user_id}")
             result = await deepseek.generate_events_digest()
             prefix = "🎭 **Афиша мероприятий на сегодня**\n\n"
-        elif query.data == WEATHER_CURRENCY_CALLBACK:
+        elif callback_data == WEATHER_CURRENCY_CALLBACK:
+            logger.info(f"🌤️ Запрос погоды и курсов от {user_id}")
             result = await deepseek.generate_weather_currency_digest()
             prefix = "🌤️ **Погода и курсы валют на сегодня**\n\n"
         else:
@@ -118,48 +130,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         footer = f"\n\n---\n🕐 Данные актуальны на {datetime.now().strftime('%H:%M %d.%m.%Y')}"
         full_response = prefix + result + footer
         
+        logger.info(f"✅ Ответ сгенерирован для пользователя {user_id}, длина: {len(full_response)} символов")
+        
+        # Отправляем ответ
         await loading_message.edit_text(full_response, parse_mode='Markdown')
+        logger.info(f"✅ Ответ отправлен пользователю {user_id}")
         
     except Exception as e:
-        logger.error(f"Ошибка в button_handler: {e}")
-        await loading_message.edit_text(
-            f"❌ Произошла ошибка при обработке запроса: {str(e)}\n\n"
-            "Пожалуйста, попробуйте позже или напишите свой вопрос текстом."
-        )
+        logger.error(f"❌ Ошибка в button_handler: {e}")
+        logger.error(traceback.format_exc())
+        try:
+            await query.edit_message_text(
+                f"❌ Произошла ошибка при обработке запроса: {str(e)}\n\n"
+                "Пожалуйста, попробуйте позже или напишите свой вопрос текстом."
+            )
+        except:
+            pass
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений (произвольные вопросы)"""
-    user_id = update.effective_user.id
-    user_message = update.message.text
-    
-    # Проверяем, активен ли пользователь
-    if user_id not in user_states or not user_states[user_id].get('active', True):
-        await update.message.reply_text("❌ Бот отключен. Для активации нажмите /start")
-        return
-    
-    # Проверяем, инициализирован ли DeepSeek
-    if deepseek is None:
-        await update.message.reply_text(
-            "❌ Сервис DeepSeek не инициализирован. "
-            "Пожалуйста, проверьте настройки DEEPSEEK_API_KEY на Render."
-        )
-        return
-    
-    # Игнорируем команды
-    if user_message.startswith('/'):
-        return
-    
-    # Обновляем статистику
-    user_states[user_id]['requests_count'] += 1
-    user_states[user_id]['last_active'] = datetime.now()
-    
-    # Отправляем сообщение о начале поиска
-    loading_message = await update.message.reply_text(
-        "🔍 Ищу информацию по вашему запросу...\n"
-        "Это может занять несколько секунд."
-    )
-    
     try:
+        user_id = update.effective_user.id
+        user_message = update.message.text
+        logger.info(f"💬 Пользователь {user_id} написал: {user_message[:50]}...")
+        
+        # Проверяем, активен ли пользователь
+        if user_id not in user_states or not user_states[user_id].get('active', True):
+            await update.message.reply_text("❌ Бот отключен. Для активации нажмите /start")
+            return
+        
+        # Проверяем, инициализирован ли DeepSeek
+        if deepseek is None:
+            await update.message.reply_text(
+                "❌ Сервис DeepSeek не инициализирован. "
+                "Пожалуйста, проверьте настройки DEEPSEEK_API_KEY на Render."
+            )
+            return
+        
+        # Игнорируем команды
+        if user_message.startswith('/'):
+            return
+        
+        # Обновляем статистику
+        user_states[user_id]['requests_count'] += 1
+        user_states[user_id]['last_active'] = datetime.now()
+        
+        # Отправляем сообщение о начале поиска
+        loading_message = await update.message.reply_text(
+            "🔍 Ищу информацию по вашему запросу...\n"
+            "⏳ Это может занять несколько секунд."
+        )
+        
         # Обрабатываем запрос через DeepSeek с поиском
         result = await deepseek.custom_query(user_message)
         
@@ -176,8 +197,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await loading_message.edit_text(full_response, parse_mode='Markdown')
             
     except Exception as e:
-        logger.error(f"Ошибка при обработке текстового запроса: {e}")
-        await loading_message.edit_text(
+        logger.error(f"❌ Ошибка при обработке текстового запроса: {e}")
+        logger.error(traceback.format_exc())
+        await update.message.reply_text(
             f"❌ Произошла ошибка при поиске информации: {str(e)}\n\n"
             "Попробуйте переформулировать запрос или нажмите /start для перезапуска."
         )
@@ -185,6 +207,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /stop"""
     user_id = update.effective_user.id
+    logger.info(f"🛑 Пользователь {user_id} остановил бота")
     
     if user_id in user_states:
         user_states[user_id]['active'] = False
@@ -196,6 +219,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Перезапуск бота"""
     user_id = update.effective_user.id
+    logger.info(f"🔄 Пользователь {user_id} перезапустил бота")
     
     if user_id in user_states:
         user_states[user_id]['active'] = True
@@ -247,7 +271,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный обработчик ошибок"""
-    logger.error(f"Ошибка: {context.error}")
+    logger.error(f"❌ Глобальная ошибка: {context.error}")
+    logger.error(traceback.format_exc())
     
     try:
         if update and update.effective_message:
