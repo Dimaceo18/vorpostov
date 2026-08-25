@@ -2,11 +2,12 @@ import logging
 from openai import AsyncOpenAI
 from datetime import datetime
 import traceback
+import re
 
 logger = logging.getLogger(__name__)
 
 class DeepSeekService:
-    """Сервис для работы с DeepSeek API с поддержкой поиска в интернете"""
+    """Сервис для работы с DeepSeek API"""
     
     def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
         self.api_key = api_key
@@ -15,216 +16,228 @@ class DeepSeekService:
             self.client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
-                timeout=120.0
+                timeout=120.0,
+                max_retries=3
             )
             logger.info("✅ DeepSeek клиент создан")
         except Exception as e:
-            logger.error(f"❌ Ошибка создания DeepSeek клиента: {e}")
+            logger.error(f"❌ Ошибка создания клиента: {e}")
             raise
-        
-        logger.info("✅ DeepSeek сервис инициализирован")
     
     async def generate_news_digest(self) -> str:
-        """Генерация дайджеста новостей с ссылками"""
+        """Генерация дайджеста новостей - только заголовки и ссылки"""
         try:
             logger.info("📰 Начинаем поиск новостей...")
-            current_date = datetime.now().strftime("%d.%m.%Y")
             
-            prompt = f"""
-            Ты - новостной агрегатор для жителей Минска и Беларуси. Сегодня {current_date}.
-            
-            Задача: Найди в интернете 7-10 САМЫХ ВАЖНЫХ новостей за последние 24 часа по Беларуси и Минску.
-            
-            Требования к ответу:
-            1. Каждая новость должна быть с заголовком и кратким описанием (2-3 предложения)
-            2. ОБЯЗАТЕЛЬНО прикрепи ссылку на оригинальную новость (URL)
-            3. Отсортируй по важности (самая важная - первая)
-            4. Сгруппируй по темам: политика, экономика, общество, спорт, культура
-            5. В начале дай краткую сводку (1-2 предложения о главном событии дня)
-            6. Оформи красиво с эмодзи 📰
-            
-            Формат каждой новости:
-            🔹 [Заголовок]
-            📝 [Краткое описание]
-            🔗 [Ссылка]
-            
-            Важно:
-            - Используй ТОЛЬКО новости за последние 24 часа
-            - Проверяй, чтобы ссылки были рабочими
-            - Пиши на русском языке
-            - Будь объективным
-            """
-            
-            logger.info("📤 Отправляем запрос в DeepSeek API...")
             response = await self.client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=2500,
-                extra_body={
-                    "enable_search": True
-                }
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Ты - новостной агрегатор. Твоя задача - собирать ТОЛЬКО САМЫЕ СВЕЖИЕ новости за последние 24 часа."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+                        Найди 15 САМЫХ СВЕЖИХ новостей за последние 24 часа по Беларуси и Минску.
+                        Сегодня {datetime.now().strftime('%d.%m.%Y')}, время {datetime.now().strftime('%H:%M')}.
+                        
+                        ВАЖНО: Используй ТОЛЬКО новости за последние 24 часа!
+                        
+                        Формат для КАЖДОЙ новости (строго):
+                        📌 ЗАГОЛОВОК НОВОСТИ
+                        🔗 Ссылка на источник
+                        
+                        Никаких описаний, только заголовок и ссылка!
+                        Никакого текста между новостями!
+                        
+                        Требования:
+                        1. 15 самых свежих новостей
+                        2. Только заголовок + ссылка
+                        3. Без описаний и комментариев
+                        4. Сортировка от самой свежей к более старым
+                        5. Все ссылки должны быть рабочими
+                        
+                        Пример:
+                        📌 В Минске открылась новая выставка современного искусства
+                        🔗 https://example.com/news/123
+                        
+                        📌 Курс доллара вырос на 2%
+                        🔗 https://example.com/news/456
+                        """
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=2000,
+                stream=False
             )
             
-            logger.info("✅ Получен ответ от DeepSeek API")
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            logger.info(f"✅ Получен ответ от DeepSeek API, длина: {len(result)}")
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Ошибка при генерации дайджеста новостей: {e}")
+            error_msg = str(e)
+            logger.error(f"❌ Ошибка при генерации новостей: {error_msg}")
             logger.error(traceback.format_exc())
-            return f"❌ Извините, произошла ошибка при поиске новостей: {str(e)}"
+            return f"❌ Ошибка при поиске новостей: {error_msg[:200]}"
     
     async def generate_events_digest(self) -> str:
         """Генерация афиши мероприятий"""
         try:
             logger.info("🎭 Начинаем поиск мероприятий...")
-            current_date = datetime.now().strftime("%d.%m.%Y")
             
-            prompt = f"""
-            Ты - культурный гид по Минску. Сегодня {current_date}.
-            
-            Задача: Найди в интернете АКТУАЛЬНУЮ афишу мероприятий в Минске на СЕГОДНЯ.
-            
-            Найди 8-10 мероприятий разных категорий:
-            - Концерты
-            - Театры (спектакли)
-            - Выставки
-            - Кино (новинки)
-            - Фестивали
-            - Детские мероприятия
-            - Спортивные события
-            
-            Для каждого мероприятия укажи:
-            🎯 Название
-            📍 Место проведения
-            🕐 Время
-            💰 Стоимость билетов (если есть информация)
-            📝 Краткое описание (1-2 предложения)
-            🔗 Ссылка на источник
-            
-            Отметь ТОП-3 самых интересных события.
-            Добавь практические советы: как добраться, где купить билеты.
-            
-            Оформи красиво с эмодзи 🎭.
-            
-            Важно:
-            - Используй ТОЛЬКО мероприятия на СЕГОДНЯ
-            - Проверяй актуальность информации
-            - Пиши на русском языке
-            - Давай конкретные рекомендации
-            """
-            
-            logger.info("📤 Отправляем запрос в DeepSeek API...")
             response = await self.client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Ты - культурный гид по Минску. Ищешь ТОЛЬКО актуальные мероприятия на сегодня."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+                        Найди 10 САМЫХ ИНТЕРЕСНЫХ мероприятий в Минске на СЕГОДНЯ ({datetime.now().strftime('%d.%m.%Y')}).
+                        
+                        ВАЖНО: Только мероприятия, которые проходят СЕГОДНЯ!
+                        
+                        Формат для КАЖДОГО мероприятия:
+                        🎯 НАЗВАНИЕ
+                        📍 Место: [название места]
+                        🕐 Время: [время начала]
+                        💰 Стоимость: [цена]
+                        📝 Краткое описание (1 предложение)
+                        🔗 Ссылка: [URL]
+                        
+                        Отметь ТОП-3 самых интересных события знаком ⭐
+                        
+                        В конце добавь практические советы:
+                        • Где купить билеты
+                        • Как добраться до основных мест
+                        
+                        Пиши на русском языке. Проверяй актуальность данных.
+                        """
+                    }
+                ],
                 temperature=0.8,
                 max_tokens=2500,
-                extra_body={
-                    "enable_search": True
-                }
+                stream=False
             )
             
-            logger.info("✅ Получен ответ от DeepSeek API")
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            logger.info(f"✅ Получен ответ от DeepSeek API, длина: {len(result)}")
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Ошибка при генерации афиши: {e}")
+            error_msg = str(e)
+            logger.error(f"❌ Ошибка при генерации афиши: {error_msg}")
             logger.error(traceback.format_exc())
-            return f"❌ Извините, произошла ошибка при поиске мероприятий: {str(e)}"
+            return f"❌ Ошибка при поиске мероприятий: {error_msg[:200]}"
     
     async def generate_weather_currency_digest(self) -> str:
-        """Генерация сводки погоды и курсов валют"""
+        """Генерация сводки погоды и курсов валют с источниками"""
         try:
             logger.info("🌤️ Начинаем поиск погоды и курсов...")
-            current_date = datetime.now().strftime("%d.%m.%Y")
             
-            prompt = f"""
-            Ты - информационный помощник по Минску. Сегодня {current_date}.
-            
-            Задача: Найди в интернете актуальную информацию:
-            
-            1. ПРОГНОЗ ПОГОДЫ в Минске на сегодня:
-               - Температура сейчас и в течение дня
-               - Осадки (вероятность, тип)
-               - Ветер (скорость, направление)
-               - Влажность
-               - Восход и закат
-               - Рекомендации: что надеть, брать ли зонт
-               
-            2. КУРСЫ ВАЛЮТ от Национального банка Беларуси на сегодня:
-               - USD/BYN
-               - EUR/BYN  
-               - RUB/BYN
-               - Изменения за последние сутки (вырос/упал)
-               - Краткий комментарий по ситуации на валютном рынке
-            
-            Оформи красиво:
-            🌤️ Погода на сегодня
-            💱 Курсы валют
-            
-            Добавь полезные советы и рекомендации.
-            
-            Важно:
-            - Используй ТОЛЬКО актуальные данные на сегодня
-            - Проверяй информацию из официальных источников
-            - Пиши на русском языке
-            """
-            
-            logger.info("📤 Отправляем запрос в DeepSeek API...")
             response = await self.client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-                max_tokens=2000,
-                extra_body={
-                    "enable_search": True
-                }
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Ты - информационный помощник. Ищешь ТОЛЬКО САМЫЕ СВЕЖИЕ данные о погоде и курсах валют."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+                        Найди САМУЮ СВЕЖУЮ информацию на СЕГОДНЯ ({datetime.now().strftime('%d.%m.%Y')}, {datetime.now().strftime('%H:%M')}):
+                        
+                        1. ПОГОДА В МИНСКЕ (только свежие данные):
+                           - Температура сейчас
+                           - Прогноз на день (макс/мин)
+                           - Осадки (есть/нет)
+                           - Ветер
+                           - Влажность
+                           - Рекомендации (одежда, зонт)
+                           - ИСТОЧНИК: [ссылка на погодный сайт]
+                        
+                        2. КУРСЫ ВАЛЮТ (только свежие курсы НБ РБ):
+                           - USD/BYN
+                           - EUR/BYN
+                           - RUB/BYN
+                           - Изменение за сутки
+                           - ИСТОЧНИК: [ссылка на сайт НБ РБ]
+                        
+                        ВАЖНО:
+                        - Используй ТОЛЬКО данные за сегодня
+                        - Проверяй актуальность (время обновления)
+                        - Обязательно указывай источники с гиперссылками
+                        - Оформляй красиво с эмодзи
+                        - В конце добавь время обновления данных
+                        
+                        Источники для погоды: meteoprog.by, gismeteo, weather.by
+                        Источники для валют: nbrb.by (официальный сайт НБ РБ)
+                        """
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+                stream=False
             )
             
-            logger.info("✅ Получен ответ от DeepSeek API")
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            # Добавляем время обновления
+            result += f"\n\n🕐 Данные обновлены: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+            logger.info(f"✅ Получен ответ от DeepSeek API, длина: {len(result)}")
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Ошибка при генерации сводки: {e}")
+            error_msg = str(e)
+            logger.error(f"❌ Ошибка при генерации сводки: {error_msg}")
             logger.error(traceback.format_exc())
-            return f"❌ Извините, произошла ошибка при поиске данных: {str(e)}"
+            return f"❌ Ошибка при поиске данных: {error_msg[:200]}"
     
     async def custom_query(self, query: str) -> str:
-        """Обработка произвольного запроса пользователя"""
+        """Обработка произвольного запроса"""
         try:
             logger.info(f"💬 Обработка запроса: {query[:50]}...")
             
-            prompt = f"""
-            Пользователь спрашивает: {query}
-            
-            Найди в интернете актуальную информацию и дай подробный ответ.
-            
-            Требования:
-            1. Ответ должен быть информативным и полным
-            2. Основан на актуальных данных
-            3. Структурирован и легко читаем
-            4. С указанием источников (ссылки)
-            5. На русском языке
-            
-            Если информация касается Минска или Беларуси - удели этому особое внимание.
-            """
-            
-            logger.info("📤 Отправляем запрос в DeepSeek API...")
             response = await self.client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Ты - помощник, который ищет свежую информацию в интернете. Всегда указывай источники."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+                        Пользователь спрашивает: {query}
+                        
+                        Найди САМУЮ СВЕЖУЮ информацию в интернете.
+                        
+                        Требования:
+                        1. Только актуальные данные
+                        2. Указывай источники (ссылки)
+                        3. Ответ структурированный и понятный
+                        4. На русском языке
+                        5. Время обновления данных
+                        
+                        Если вопрос про Минск или Беларусь - ищи локальную информацию.
+                        """
+                    }
+                ],
                 temperature=0.7,
                 max_tokens=2000,
-                extra_body={
-                    "enable_search": True
-                }
+                stream=False
             )
             
-            logger.info("✅ Получен ответ от DeepSeek API")
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            result += f"\n\n🕐 Данные обновлены: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+            logger.info(f"✅ Получен ответ от DeepSeek API, длина: {len(result)}")
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Ошибка при обработке запроса: {e}")
+            error_msg = str(e)
+            logger.error(f"❌ Ошибка при обработке запроса: {error_msg}")
             logger.error(traceback.format_exc())
-            return f"❌ Извините, произошла ошибка при поиске информации: {str(e)}"
+            return f"❌ Ошибка при поиске информации: {error_msg[:200]}"
