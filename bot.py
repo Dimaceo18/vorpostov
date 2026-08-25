@@ -1,7 +1,6 @@
 import logging
 import os
 import sys
-from dotenv import load_dotenv
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -12,9 +11,6 @@ from telegram.ext import (
 
 # Добавляем текущую директорию в путь
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Загружаем переменные окружения
-load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -44,11 +40,23 @@ except ImportError as e:
 
 def main():
     """Основная функция запуска бота"""
+    # Получаем токен из переменных окружения
     token = os.getenv('TELEGRAM_TOKEN')
     if not token:
         logger.error("❌ TELEGRAM_TOKEN не найден в переменных окружения")
-        logger.info("Пожалуйста, создайте файл .env с переменной TELEGRAM_TOKEN")
+        logger.info("Пожалуйста, добавьте переменную TELEGRAM_TOKEN в настройках Render")
         return
+    
+    logger.info(f"✅ TELEGRAM_TOKEN найден: {token[:10]}...")
+    
+    # Проверяем DeepSeek API ключ
+    deepseek_key = os.getenv('DEEPSEEK_API_KEY')
+    if not deepseek_key:
+        logger.error("❌ DEEPSEEK_API_KEY не найден в переменных окружения")
+        logger.info("Пожалуйста, добавьте переменную DEEPSEEK_API_KEY в настройках Render")
+        return
+    
+    logger.info(f"✅ DEEPSEEK_API_KEY найден: {deepseek_key[:10]}...")
     
     try:
         # Создаем приложение
@@ -75,7 +83,6 @@ def main():
         
         # Запускаем бота
         logger.info("🚀 Бот с ИИ и поиском в интернете запущен!")
-        logger.info(f"📱 Бот @{application.bot.username if hasattr(application.bot, 'username') else 'unknown'}")
         application.run_polling()
         
     except Exception as e:
