@@ -1,8 +1,9 @@
 import logging
 import os
 import sys
+import asyncio
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -38,52 +39,70 @@ except ImportError as e:
     logger.error(f"❌ Ошибка импорта handlers: {e}")
     sys.exit(1)
 
+async def clear_webhook_and_start(application):
+    """Очищаем webhook и запускаем polling"""
+    try:
+        # Пытаемся удалить webhook
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook очищен")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось очистить webhook: {e}")
+    
+    # Запускаем polling с явным указанием разрешенных обновлений
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(
+        allowed_updates=['message', 'callback_query'],
+        drop_pending_updates=True
+    )
+    logger.info("🚀 Бот запущен и слушает обновления")
+    
+    # Держим бота запущенным
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
 def main():
     """Основная функция запуска бота"""
-    # Получаем токен из переменных окружения
     token = os.getenv('TELEGRAM_TOKEN')
     if not token:
-        logger.error("❌ TELEGRAM_TOKEN не найден в переменных окружения")
-        logger.info("Пожалуйста, добавьте переменную TELEGRAM_TOKEN в настройках Render")
+        logger.error("❌ TELEGRAM_TOKEN не найден")
         return
     
     logger.info(f"✅ TELEGRAM_TOKEN найден: {token[:10]}...")
     
-    # Проверяем DeepSeek API ключ
     deepseek_key = os.getenv('DEEPSEEK_API_KEY')
     if not deepseek_key:
-        logger.error("❌ DEEPSEEK_API_KEY не найден в переменных окружения")
-        logger.info("Пожалуйста, добавьте переменную DEEPSEEK_API_KEY в настройках Render")
+        logger.error("❌ DEEPSEEK_API_KEY не найден")
         return
     
     logger.info(f"✅ DEEPSEEK_API_KEY найден: {deepseek_key[:10]}...")
     
     try:
         # Создаем приложение
-        application = ApplicationBuilder().token(token).build()
+        application = Application.builder().token(token).build()
         
-        # Регистрируем обработчики команд
+        # Добавляем обработчики
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("restart", restart_command))
         application.add_handler(CommandHandler("stop", stop_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("stats", stats_command))
-        
-        # Регистрируем обработчик кнопок
         application.add_handler(CallbackQueryHandler(button_handler))
-        
-        # Регистрируем обработчик текстовых сообщений
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        
-        # Регистрируем обработчик неизвестных команд
         application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
-        
-        # Регистрируем глобальный обработчик ошибок
         application.add_error_handler(error_handler)
         
-        # Запускаем бота
-        logger.info("🚀 Бот с ИИ и поиском в интернете запущен!")
-        application.run_polling()
+        logger.info("🚀 Запускаем бота с очисткой webhook...")
+        
+        # Запускаем с очисткой webhook
+        asyncio.run(clear_webhook_and_start(application))
         
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
