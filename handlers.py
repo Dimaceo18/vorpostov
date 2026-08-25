@@ -13,12 +13,15 @@ DEEPSEEK_BASE_URL = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
 
 if not DEEPSEEK_API_KEY:
     logger.error("❌ DEEPSEEK_API_KEY не найден в переменных окружения")
-    raise ValueError("DEEPSEEK_API_KEY is required")
-
-deepseek = DeepSeekService(
-    api_key=DEEPSEEK_API_KEY,
-    base_url=DEEPSEEK_BASE_URL
-)
+    # Вместо ошибки, создаем заглушку
+    deepseek = None
+    logger.warning("⚠️ DeepSeek сервис не инициализирован")
+else:
+    deepseek = DeepSeekService(
+        api_key=DEEPSEEK_API_KEY,
+        base_url=DEEPSEEK_BASE_URL
+    )
+    logger.info("✅ DeepSeek сервис успешно инициализирован")
 
 # Константы для callback_data
 NEWS_CALLBACK = "news"
@@ -79,6 +82,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Бот отключен. Для активации нажмите /start")
         return
     
+    # Проверяем, инициализирован ли DeepSeek
+    if deepseek is None:
+        await query.edit_message_text(
+            "❌ Сервис DeepSeek не инициализирован. "
+            "Пожалуйста, проверьте настройки DEEPSEEK_API_KEY на Render."
+        )
+        return
+    
     # Обновляем статистику
     user_states[user_id]['requests_count'] += 1
     user_states[user_id]['last_active'] = datetime.now()
@@ -124,6 +135,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, активен ли пользователь
     if user_id not in user_states or not user_states[user_id].get('active', True):
         await update.message.reply_text("❌ Бот отключен. Для активации нажмите /start")
+        return
+    
+    # Проверяем, инициализирован ли DeepSeek
+    if deepseek is None:
+        await update.message.reply_text(
+            "❌ Сервис DeepSeek не инициализирован. "
+            "Пожалуйста, проверьте настройки DEEPSEEK_API_KEY на Render."
+        )
         return
     
     # Игнорируем команды
