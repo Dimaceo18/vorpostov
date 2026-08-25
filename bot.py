@@ -30,9 +30,9 @@ try:
         error_handler,
         unknown_command
     )
-    logger.info("✅ Модуль handlers загружен")
+    logger.info("✅ handlers загружен")
 except ImportError as e:
-    logger.error(f"❌ Ошибка импорта handlers: {e}")
+    logger.error(f"❌ Ошибка: {e}")
     sys.exit(1)
 
 def main():
@@ -41,14 +41,10 @@ def main():
         logger.error("❌ TELEGRAM_TOKEN не найден")
         return
     
-    logger.info(f"✅ TELEGRAM_TOKEN: {token[:10]}...")
-    
     deepseek_key = os.getenv('DEEPSEEK_API_KEY')
     if not deepseek_key:
         logger.error("❌ DEEPSEEK_API_KEY не найден")
         return
-    
-    logger.info(f"✅ DEEPSEEK_API_KEY: {deepseek_key[:10]}...")
     
     try:
         application = Application.builder().token(token).build()
